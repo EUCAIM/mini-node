@@ -1,0 +1,14 @@
+
+host_path: "/var/node/"
+  # The path in the host that it is shared to the node services
+
+public_domain: ""
+  # The public domain where the node will be accessible
+  # Example: "mini-node.i3m.upv.es"
+
+keycloak:
+  admin_password: ""
+    # The password to access the admin console of users management
+    # Example: "mini-node.i3m.upv.es"
+
+
