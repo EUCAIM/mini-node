@@ -20,3 +20,11 @@ GitHub SSH key configured
   `git clone https://github.com/EUCAIM/mini-node.git`<br/>
   `cd mini-node`
 
+2. Edit config.yaml
+Fill in your domain, passwords, and other required values.
+
+3. Run the installer:
+
+micro: Installs Keycloak, Dataset Service, and Guacamole.
+mini: TODO//
+standard: TODO//
