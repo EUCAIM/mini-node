@@ -25,6 +25,6 @@ Fill in your domain, passwords, and other required values.
 
 3. Run the installer:
 
-micro: Installs Keycloak, Dataset Service, and Guacamole.
-mini: TODO//
-standard: TODO//
+- micro: Installs Keycloak, Dataset Service, and Guacamole.
+- mini: TODO//
+- standard: TODO//
