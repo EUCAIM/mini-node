@@ -13,3 +13,10 @@ Python 3.8+
 kubectl and minikube installed and configured
 Helm installed (helm must be available in your PATH)
 GitHub SSH key configured
+
+## Usage
+1. Clone this repository:
+
+"git clone https://github.com/EUCAIM/mini-node.git"
+"cd mini-node"
+
