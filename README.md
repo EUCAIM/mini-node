@@ -30,7 +30,7 @@ Example (Windows host):
 
 **Important:** For the mount to work on Windows, the host path must be inside a directory that Docker Desktop has shared with the internal Linux VM. This is configured in Docker Desktop → Settings → Resources → File Sharing.
 
-<pre> ```powershell minikube start --driver=docker ` --mount ` --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner" ``` </pre>
+<pre> minikube start --driver=docker ` --mount ` --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner" </pre>
 
 
 
