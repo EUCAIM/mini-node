@@ -19,17 +19,21 @@ By default, Minikube’s default hostPath provisioner stores PersistentVolume da
 
 To ensure data is stored on the host machine and survives Minikube restarts, configure a host directory mount at startup so that /var/hostpath-provisioner in Minikube points to a persistent directory on your host.
 
-Example (Linux host):
+Example (Linux and macOs host):
 
 `minikube start --driver=docker \` <br/>
 `--mount \` <br/>
 `--mount-string="/home/ubuntu/minikube-data:/var/hostpath-provisioner"`
+
 
 Example (Windows host):
 
 **Important:** For the mount to work on Windows, the host path must be inside a directory that Docker Desktop has shared with the internal Linux VM. This is configured in Docker Desktop → Settings → Resources → File Sharing.
 
 <pre> ```powershell minikube start --driver=docker ` --mount ` --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner" ``` </pre>
+
+
+
 
 
 ## Usage
