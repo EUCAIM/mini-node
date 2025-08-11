@@ -45,7 +45,7 @@ Example (Windows host):
 2. Edit config.yaml
 Fill in your domain, passwords, and other required values.
 
-3. Run the installer:
+3. Run the installer with python install.py:
 
 - micro: Installs Keycloak, Dataset Service, and Guacamole.
 - mini: TODO//
