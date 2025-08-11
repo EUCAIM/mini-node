@@ -14,6 +14,23 @@ kubectl and minikube installed and configured
 Helm installed (helm must be available in your PATH)
 GitHub SSH key configured
 
+### Persistent Storage Setup (Recommended)
+By default, Minikube’s default hostPath provisioner stores PersistentVolume data inside the Minikube VM/container. When using the Docker driver, this means that the data lives inside the ephemeral Minikube container and will be lost if the cluster is deleted or recreated.
+
+To ensure data is stored on the host machine and survives Minikube restarts, configure a host directory mount at startup so that /var/hostpath-provisioner in Minikube points to a persistent directory on your host.
+
+Example (Linux host):
+
+`minikube start --driver=docker \` <br/>
+`--mount \` <br/>
+`--mount-string="/home/ubuntu/minikube-data:/var/hostpath-provisioner"`
+
+Example (Windows host):
+**Important:** For the mount to work on Windows, the host path must be inside a directory that Docker Desktop has shared with the internal Linux VM. This is configured in Docker Desktop → Settings → Resources → File Sharing.
+
+<pre> ```powershell minikube start --driver=docker ` --mount ` --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner" ``` </pre>
+
+
 ## Usage
 1. Clone this repository:
 
