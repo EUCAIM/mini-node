@@ -10,7 +10,7 @@ config.yaml – Example configuration file for secrets, domains, and service par
 ## Prerequisites
 Linux distribution
 Python 3.8+
-kubectl and minikube installed and configured
+kubectl and minikube installed and configured with the addons: ingress
 Helm installed (helm must be available in your PATH)
 GitHub SSH key configured
 
@@ -20,20 +20,21 @@ By default, Minikube’s default hostPath provisioner stores PersistentVolume da
 To ensure data is stored on the host machine and survives Minikube restarts, configure a host directory mount at startup so that /var/hostpath-provisioner in Minikube points to a persistent directory on your host.
 
 Example (Linux and macOs host):
-
-`minikube start --driver=docker \` <br/>
-`--mount \` <br/>
-`--mount-string="/home/ubuntu/minikube-data:/var/hostpath-provisioner"`
-
+```
+minikube start --driver=docker --addons ingress \
+               --cpus 8  --memory 32g \
+               --mount --mount-string="/home/ubuntu/minikube-data:/var/hostpath-provisioner"
+```
 
 Example (Windows host):
 
 **Important:** For the mount to work on Windows, the host path must be inside a directory that Docker Desktop has shared with the internal Linux VM. This is configured in Docker Desktop → Settings → Resources → File Sharing.
 
-<pre> minikube start --driver=docker ` --mount ` --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner" </pre>
-
-
-
+```
+minikube start --driver=docker --addons ingress \
+               --cpus 8  --memory 32g \
+               --mount --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner"
+```
 
 
 ## Usage
@@ -50,3 +51,5 @@ Fill in your domain, passwords, and other required values.
 - micro: Installs Keycloak, Dataset Service, and Guacamole.
 - mini: TODO//
 - standard: TODO//
+
+
