@@ -29,12 +29,14 @@ The minikube proxy address is 192.168.49.2 and nodeports are 30906 and 31630 (wh
 
 So let's add iptables rules to forward external ports 80 and 443 (i.e. host ports, not the target ports) to the ingess-nginx-controller service.
 
-The first rules to be added will do NAT for all packets with destination ports 80 and 443, 
+The first rules to be added will do NAT for all packets with destination ports 80 and 443 and from the network interface "ens4", 
 changing that destination of the packets to the proxy address and the corresponding nodeport of the service.
 ```
-sudo iptables -t nat -A PREROUTING -p tcp --dport 80 -j DNAT --to-destination 192.168.49.2:30906
-sudo iptables -t nat -A PREROUTING -p tcp --dport 443 -j DNAT --to-destination 192.168.49.2:31630
+sudo iptables -t nat -A PREROUTING -i ens4 -p tcp --dport 80 -j DNAT --to-destination 192.168.49.2:30906
+sudo iptables -t nat -A PREROUTING -i ens4 -p tcp --dport 443 -j DNAT --to-destination 192.168.49.2:31630
 ```
+The network interface "ens4" is the one connected to the local network where packets come to the host to access the services in our case.
+That name in your case can be different, you can see it with `ip addr` or `ifconfig`.
 We can confirm the rules are added with `sudo iptables --list -t nat` (see in the PREROUTING chain).
 
 Then we must add another rules to accept forwarded packets (matching with the destination address and ports changed in PREROUTING).
