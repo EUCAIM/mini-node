@@ -10,7 +10,6 @@ import yaml
 from config import *
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-#Specify that the user should be previously logged in GitHub and have the SSH key configured
 DEFAULT_CONFIG_FILE_PATH = "config.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
 
@@ -91,7 +90,6 @@ def install_keycloak(CONFIG):
             yaml.safe_dump_all(docs, f, sort_keys=False)
         print(f"Injected password into POSTGRES_PASSWORD in {keycloak_db_file}")
 
-    # Inject Keycloak deployment env vars
     keycloak_deploy_file = "dep3_keycloak_v4.yaml"
     with open(keycloak_deploy_file) as f:
         docs = list(yaml.safe_load_all(f))
@@ -167,6 +165,7 @@ def install_keycloak(CONFIG):
     cmd("minikube kubectl -- apply -f dep4_ingress.yaml -n keycloak")
 
     os.chdir("..")
+    
 
 def install_dataset_service(CONFIG):
     prev_dir = os.getcwd()
@@ -185,7 +184,7 @@ def install_dataset_service(CONFIG):
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datasets'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/'")
 
-        # 1. Generar contraseña e inyectar en POSTGRES_PASSWORD
+
         with open(db_service_file) as f:
             docs = list(yaml.safe_load_all(f))
         updated_db = False
@@ -205,6 +204,7 @@ def install_dataset_service(CONFIG):
             print("Warning: Could not find POSTGRES_PASSWORD to update password.")
         ### IMPORTANTE, EN 2-dataset-service.private.yaml --> env DATASET_SERVICE_CONFIG --> auth --> client --> client_secret hay que añadir el secret de keycloak no aleatorio
         # 2. Inyectar contraseña y tokens en DATASET_SERVICE_CONFIG del deployment
+        
         with open(deployment_file) as f:
             docs = list(yaml.safe_load_all(f))
         updated = False
@@ -217,10 +217,10 @@ def install_dataset_service(CONFIG):
                             import json
                             config_json = env["value"]
                             config = json.loads(config_json)
-                            # 1. Poner la misma password en db.password
+                            # 1. Same password in db.password
                             if "db" in config:
                                 config["db"]["password"] = CONFIG.postgres.db_password
-                            # 2. Reemplazar XXXXXXXX en self por tokens aleatorios
+                            # 2. Replace XXXXXXXX in self with random tokens
                             if "self" in config:
                                 for key, value in config["self"].items():
                                     if isinstance(value, str) and value == "XXXXXXXX":
@@ -234,14 +234,13 @@ def install_dataset_service(CONFIG):
         else:
             print("Warning: Could not find DATASET_SERVICE_CONFIG to update password and tokens.")
 
-        # Aplicar recursos
         cmd("minikube kubectl -- apply -f 1-db-service.yaml -n dataset-service")
         cmd("minikube kubectl -- apply -f 0-pvcs.yaml -n dataset-service")
         cmd("minikube kubectl -- apply -f 0-service-account.yaml -n dataset-service")
         cmd(f"minikube kubectl -- apply -f {deployment_file} -n dataset-service")
     finally:
         os.chdir(prev_dir)
-
+        
 
 def install_guacamole(CONFIG):
     prev_dir = os.getcwd()
@@ -252,7 +251,6 @@ def install_guacamole(CONFIG):
         cmd("minikube kubectl -- create namespace guacamole || true")
         cmd("minikube kubectl -- apply -f postgresql-pvc.yaml -n guacamole")
 
-        # 1. Update PostgreSQL values
         values_file = "postgresql-values.yaml"
         with open(values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
@@ -264,14 +262,13 @@ def install_guacamole(CONFIG):
             'password': CONFIG.postgres.db_password,
             'database': CONFIG.postgres.database,
         })
+        
         with open(values_file, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
 
-        # 2. Update Guacamole values (Postgres + OIDC)
         guaca_file = "guacamole-values.yaml"
         with open(guaca_file, 'r') as f:
             data_pg = yaml.safe_load(f) or {}
-
 
         pg = data_pg.setdefault('postgres', {})
         pg.update({
@@ -281,7 +278,6 @@ def install_guacamole(CONFIG):
             'hostname': CONFIG.guacamole.hostname,
             'port': CONFIG.guacamole.port
         })
-
 
         dbcreation = data_pg.setdefault('dbcreation', {})
         dbcreation.update({
@@ -302,7 +298,6 @@ def install_guacamole(CONFIG):
         with open(guaca_file, 'w') as f:
             yaml.dump(data_pg, f, default_flow_style=False, sort_keys=False, indent=2)
 
-        # 3. Clone custom Helm chart and install Guacamole
         private_post_values = "postgresql-values.yaml"
         cmd("helm uninstall postgresql --namespace guacamole || true")
 
