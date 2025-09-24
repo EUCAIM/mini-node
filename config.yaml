@@ -1,14 +1,44 @@
-
 host_path: "/var/node/"
   # The path in the host that it is shared to the node services
 
-public_domain: ""
+public_domain: "yourdomain.com"
   # The public domain where the node will be accessible
-  # Example: "mini-node.i3m.upv.es"
+
+postgres:
+  db_password: "yourdbpassword"
+  username: "yourusername"
+  database: "yourdatabase"
+
+  
 
 keycloak:
-  admin_password: ""
+  admin_username: "admin"
+    # The name of the admin user
+  admin_password: "supersecret_admin"
     # The password to access the admin console of users management
-    # Example: "mini-node.i3m.upv.es"
+  db_password: "supersecret_db"
+    # The password for the keycloak database user
+  admin_emails: "admin@example.com,admin2@example.com"
+    # Comma-separated list of admin emails to notify new user registrations
 
 
+guacamole:
+  postgresPassword: "xxxxxxxxx"
+  username: "guacadmin"
+  password: "xxxxxxxxx"
+  database: "guacamole"
+  postgres:
+    hostname: "postgresql"
+    port: 5432
+    username: "guacamole"
+    password: "password"
+    database: "guacamole"
+
+oidc:
+  authorization_endpoint: "authorization_endpoint"
+  jwks_endpoint: "jwks_endpoint"
+  issuer: "issuer_url"
+  clientID: "oidc_client_id"
+  redirect_uri: "oidc_redirect_uri"
+  username_claim_type: "oidc_username_claim"
+  groups_claim_type: "oidc_groups_claim"
