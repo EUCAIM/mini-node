@@ -23,7 +23,6 @@ def cmd(command, exit_on_error=True):
     return ret
 
 def generate_random_password(length: int = 16) -> str:
-
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choice(alphabet) for _ in range(length))
 
@@ -46,7 +45,15 @@ def force_cleanup_pvs():
         
         cmd("sleep 5")
 
-def install_keycloak():
+class Auth_client_secrets():
+    def __init__(self):
+        self.CLIENT_DATASET_SERVICE_SECRET = generate_random_password(32)
+        self.CLIENT_FEM_CLIENT_SECRET = generate_random_password(32)
+        self.CLIENT_JOBMAN_SERVICE_SECRET = generate_random_password(32)
+        self.CLIENT_KUBERNETES_SECRET = generate_random_password(32)
+        self.CLIENT_KUBERNETES_OPERATOR_SECRET = generate_random_password(32)
+
+def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if CONFIG is None: raise Exception()
     keycloak_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak")
     os.chdir(keycloak_path)
@@ -102,7 +109,8 @@ def install_keycloak():
             yaml.safe_dump_all(docs, f, sort_keys=False)
         print(f"Injected password into POSTGRES_PASSWORD in {keycloak_db_file}")
 
-    # Inject Keycloak deployment env vars
+    # Inject Keycloak deployment changes
+    realm_config_file_private = "eucaim-node-realm.private.json"
     keycloak_deploy_file = "dep3_keycloak_v4.yaml"
     with open(keycloak_deploy_file) as f:
         docs = list(yaml.safe_load_all(f))
@@ -125,6 +133,22 @@ def install_keycloak():
                 elif env.get("name") == "KC_HOSTNAME":
                     env["value"] = CONFIG.public_domain
                     updated = True
+            found = False
+            for param in doc["spec"]["template"]["spec"]["containers"][0].get("args", []):
+                if str(param).find("--import-realm") >= 0: found = True
+            if not found:
+                doc["spec"]["template"]["spec"]["containers"][0]["args"].append("--import-realm")
+                updated = True
+            found = False
+            for mount in doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]:
+                if mount["subPath"] == realm_config_file_private: found = True
+            if not found:
+                doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append({
+                    "name": "vol-standalone-deployments",
+                    "subPath": realm_config_file_private,
+                    "mountPath": "/opt/keycloak/data/import/" + realm_config_file_private
+                })
+                updated = True
     if updated:
         with open(keycloak_deploy_file, 'w') as f:
             yaml.safe_dump_all(docs, f, sort_keys=False)
@@ -152,6 +176,26 @@ def install_keycloak():
     # Copy JARs individually with specific filenames
     cmd("minikube cp /tmp/keycloak-event-listener-email-to-admin-1.0.6.jar minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
     cmd("minikube cp /tmp/keycloak-required-action-user-validated-1.0.5.jar minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+
+    # Prepare the realm private config file from the template, replacing the placeholders
+    realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
+    realm_config_file_private = os.path.join(SCRIPT_DIR, realm_config_file_private)
+    with open(realm_config_file, "rt") as fin:
+        with open(realm_config_file_private, "wt") as fout:
+            for line in fin:
+                l = line.replace("{{ PUBLIC_DOMAIN }}", CONFIG.public_domain)
+                l = l.replace("{{ IDP_LSRI_ENABLED }}", "true" if CONFIG.keycloak.idp_lsri.enabled else "false")
+                l = l.replace("{{ IDP_LSRI_CLIENT_ID }}", CONFIG.keycloak.idp_lsri.client_id)
+                l = l.replace("{{ IDP_LSRI_CLIENT_SECRET }}", CONFIG.keycloak.idp_lsri.client_secret)
+                l = l.replace("{{ CLIENT_DATASET_SERVICE_SECRET }}", auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
+                l = l.replace("{{ CLIENT_FEM_CLIENT_SECRET }}", auth_client_secrets.CLIENT_FEM_CLIENT_SECRET)
+                l = l.replace("{{ CLIENT_JOBMAN_SERVICE_SECRET }}", auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
+                l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
+                l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
+                fout.write(l)
+    # Copy the realm private config file to the host shared path
+    cmd(f"cp {realm_config_file_private} {CONFIG.host_path}keycloak/standalone-deployments/")
+
     # Apply Keycloak deployment manifests - DATABASE FIRST
     cmd("minikube kubectl -- apply -f dep2_database.yaml -n keycloak")
     
@@ -202,7 +246,7 @@ def install_keycloak():
 
     os.chdir("..")
 
-def install_dataset_service():
+def install_dataset_service(auth_client_secret: str):
     if CONFIG is None: raise Exception()
     prev_dir = os.getcwd()
     try:
@@ -262,7 +306,7 @@ def install_dataset_service():
                                         config["self"][key] = generate_random_password(16)
                             # 3. Inject Keycloak client secret in auth.client.client_secret
                             if "auth" in config and "client" in config["auth"]:
-                                config["auth"]["client"]["client_secret"] = CONFIG.keycloak.client_secret
+                                config["auth"]["client"]["client_secret"] = auth_client_secret
                             
                             # 4. Replace hardcoded domain with configured public domain
                             config_str = json.dumps(config)
@@ -722,7 +766,7 @@ echo "  sudo iptables -L FORWARD -n --line-numbers"
 def install_qpi():
     pass
 
-def install_jobman_service():
+def install_jobman_service(auth_client_secret: str):
     if CONFIG is None: raise Exception()
     """
     Placeholder for installing the jobman service.
@@ -757,23 +801,26 @@ def install(flavor):
 
 
     if flavor == "micro":
-        install_keycloak()
-        install_dataset_service()
+        auth_client_secrets = Auth_client_secrets()   # autogenerate auth client secrets
+        install_keycloak(auth_client_secrets)
+        install_dataset_service(auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
         install_guacamole()
         # TO COMPLETE
 
     if flavor == "mini":
-        install_keycloak()
-        install_dataset_service()
-        install_jobman_service()
+        auth_client_secrets = Auth_client_secrets()   # autogenerate auth client secrets
+        install_keycloak(auth_client_secrets)
+        install_dataset_service(auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
+        install_jobman_service(auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
 
         # TO COMPLETE
 
     if flavor == "standard":
-        install_keycloak()
-        install_dataset_service()
+        auth_client_secrets = Auth_client_secrets()   # autogenerate auth client secrets
+        install_keycloak(auth_client_secrets)
+        install_dataset_service(auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
         install_qpi()
-        install_jobman_service()
+        install_jobman_service(auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
 
         # TO COMPLETE
 

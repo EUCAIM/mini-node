@@ -46,8 +46,13 @@ class Config:
             self.admin_password = kc['admin_password']
             self.db_password = kc['db_password']
             self.admin_emails = kc['admin_emails']
-            # Optional: client secret for OIDC integration
-            self.client_secret = kc.get('client_secret')
+            self.idp_lsri = Config.Keycloak.Idp_lsri(kc['idp_lsri'])
+
+        class Idp_lsri:
+            def __init__(self, kc: dict):
+                self.enabled = kc['enabled']
+                self.client_id = kc['client_id']
+                self.client_secret = kc['client_secret']
 
     class Guacamole:
         def __init__(self, gu: dict):

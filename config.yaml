@@ -19,8 +19,10 @@ keycloak:
     # The password for the keycloak database user
   admin_emails: "admin@example.com,admin2@example.com"
     # Comma-separated list of admin emails to notify new user registrations
-  client_secret: "**********"
-    # The client secret for Keycloak OIDC client
+  idp_lsri:
+    enabled: false
+    client_id: "xxxxxxxxx"
+    client_secret: "xxxxxxxxx"
 
 guacamole:
   hostname: "postgresql"
