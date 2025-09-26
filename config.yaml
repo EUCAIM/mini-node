@@ -8,7 +8,6 @@ postgres:
   db_password: "yourdbpassword"
   username: "yourusername"
   database: "yourdatabase"
-
   
 
 keycloak:
@@ -20,19 +19,16 @@ keycloak:
     # The password for the keycloak database user
   admin_emails: "admin@example.com,admin2@example.com"
     # Comma-separated list of admin emails to notify new user registrations
-
+  client_secret: "**********"
+    # The client secret for Keycloak OIDC client
 
 guacamole:
-  postgresPassword: "xxxxxxxxx"
-  username: "guacadmin"
-  password: "xxxxxxxxx"
+  hostname: "postgresql"
+  port: "5432"
+  username: "guacamole"
+  password: "password"
   database: "guacamole"
-  postgres:
-    hostname: "postgresql"
-    port: 5432
-    username: "guacamole"
-    password: "password"
-    database: "guacamole"
+  postgresPassword: "xxxxxxxxx"
 
 oidc:
   authorization_endpoint: "authorization_endpoint"

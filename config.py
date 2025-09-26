@@ -39,6 +39,10 @@ class Config:
         self.keycloak = Config.Keycloak(cfg['keycloak'])
         self.guacamole = Config.Guacamole(cfg['guacamole'])
         self.oidc = Config.OIDC(cfg['oidc'])
+        
+        # Optional: Let's Encrypt configuration for TLS certificates
+        if 'letsencrypt' in cfg:
+            self.letsencrypt = Config.LetsEncrypt(cfg['letsencrypt'])
 
     class Postgres:
         def __init__(self, pg: dict):
@@ -63,10 +67,12 @@ class Config:
             self.admin_password = kc['admin_password']
             self.db_password = kc['db_password']
             self.admin_emails = kc['admin_emails']
+            # Optional: client secret for OIDC integration
+            self.client_secret = kc.get('client_secret')
 
     class Guacamole:
         def __init__(self, gu: dict):
-            required = ['postgresPassword', 'username', 'password', 'database', 'hostname', 'port']
+            required = ['postgresPassword', 'username', 'password', 'database']
             for key in required:
                 if key not in gu:
                     raise ValueError(f"Missing required guacamole config key: '{key}'")
@@ -93,3 +99,14 @@ class Config:
             self.redirect_uri = od['redirect_uri']
             self.username_claim_type = od['username_claim_type']
             self.groups_claim_type = od['groups_claim_type']
+
+    class LetsEncrypt:
+        def __init__(self, le: dict):
+            required = ['email']
+            for key in required:
+                if key not in le:
+                    raise ValueError(f"Missing required letsencrypt config key: '{key}'")
+            self.email = le['email']
+            # Optional: use staging environment for testing
+            self.use_staging = le.get('use_staging', False)
+
