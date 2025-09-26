@@ -14,6 +14,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 #Specify that the user should be previously logged in GitHub and have the SSH key configured
 DEFAULT_CONFIG_FILE_PATH = "config.private.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
+CONFIG = None
 
 def cmd(command, exit_on_error=True):
     print(command)
@@ -45,7 +46,8 @@ def force_cleanup_pvs():
         
         cmd("sleep 5")
 
-def install_keycloak(CONFIG):
+def install_keycloak():
+    if CONFIG is None: raise Exception()
     keycloak_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak")
     os.chdir(keycloak_path)
     # TODO ADD KUBERNETES PORTFORWARDING TO ACESS KEYCLOAK INGRESS
@@ -200,7 +202,8 @@ def install_keycloak(CONFIG):
 
     os.chdir("..")
 
-def install_dataset_service(CONFIG):
+def install_dataset_service():
+    if CONFIG is None: raise Exception()
     prev_dir = os.getcwd()
     try:
         dataset_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service")
@@ -284,7 +287,8 @@ def install_dataset_service(CONFIG):
         os.chdir(prev_dir)
 
 
-def install_guacamole(CONFIG):
+def install_guacamole():
+    if CONFIG is None: raise Exception()
     prev_dir = os.getcwd()
     try:
         guacamole = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "guacamole")
@@ -715,11 +719,11 @@ echo "  sudo iptables -L FORWARD -n --line-numbers"
         print(f"sudo cp {script_path} /etc/network/if-pre-up.d/")
         print("sudo chmod +x /etc/network/if-pre-up.d/mininode-iptables-rules")
 
-def install_qpi(CONFIG):
-
+def install_qpi():
     pass
 
-def install_jobman_service(CONFIG):
+def install_jobman_service():
+    if CONFIG is None: raise Exception()
     """
     Placeholder for installing the jobman service.
     """
@@ -753,23 +757,23 @@ def install(flavor):
 
 
     if flavor == "micro":
-        install_keycloak(CONFIG)
-        install_dataset_service(CONFIG)
-        install_guacamole(CONFIG)
+        install_keycloak()
+        install_dataset_service()
+        install_guacamole()
         # TO COMPLETE
 
     if flavor == "mini":
-        install_keycloak(CONFIG)
-        install_dataset_service(CONFIG)
-        install_jobman_service(CONFIG)
+        install_keycloak()
+        install_dataset_service()
+        install_jobman_service()
 
         # TO COMPLETE
 
     if flavor == "standard":
-        install_keycloak(CONFIG)
-        install_dataset_service(CONFIG)
-        install_qpi(CONFIG)
-        install_jobman_service(CONFIG)
+        install_keycloak()
+        install_dataset_service()
+        install_qpi()
+        install_jobman_service()
 
         # TO COMPLETE
 

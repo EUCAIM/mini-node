@@ -2,27 +2,6 @@ import os
 import yaml
 
 
-def load_config(logger, config_file_path):
-    if not os.path.exists(config_file_path):
-        logger.error(f"ERROR: Configuration file not found at {config_file_path}")
-        return None
-
-    try:
-        with open(config_file_path) as f:
-            raw = yaml.safe_load(f)
-    except Exception as e:
-        logger.error(f"ERROR: Cannot load configuration from {config_file_path}: {e}")
-        return None
-
-    try:
-        CONFIG = Config(raw)
-    except ValueError as e:
-        logger.error(f"Configuration error: {e}")
-        return None
-
-    return CONFIG
-
-
 class Config:
     def __init__(self, cfg: dict):
         # Top-level required keys
@@ -110,3 +89,23 @@ class Config:
             # Optional: use staging environment for testing
             self.use_staging = le.get('use_staging', False)
 
+
+def load_config(logger, config_file_path) -> Config | None:
+    if not os.path.exists(config_file_path):
+        logger.error(f"ERROR: Configuration file not found at {config_file_path}")
+        return None
+
+    try:
+        with open(config_file_path) as f:
+            raw = yaml.safe_load(f)
+    except Exception as e:
+        logger.error(f"ERROR: Cannot load configuration from {config_file_path}: {e}")
+        return None
+
+    try:
+        CONFIG = Config(raw)
+    except ValueError as e:
+        logger.error(f"Configuration error: {e}")
+        return None
+
+    return CONFIG
