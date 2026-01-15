@@ -325,7 +325,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
                 # Verify it's a valid ZIP/JAR file
                 verify_result = cmd(f"unzip -t {jar_path} >/dev/null 2>&1", exit_on_error=False)
                 if verify_result == 0:
-                    print(f"  ✓ Downloaded and verified: {os.path.basename(jar_path)} ({file_size} bytes)")
+                    print(f"  Downloaded and verified: {os.path.basename(jar_path)} ({file_size} bytes)")
                     success = True
                     break
                 else:
@@ -433,7 +433,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     os.chdir("..")
 
-def ensure_ingress_addon():"
+def ensure_ingress_addon():
     print("Checking minikube ingress addon...")
     ret = cmd("minikube addons list | grep 'ingress' | grep 'enabled'", exit_on_error=False)
     if ret != 0:
@@ -466,7 +466,7 @@ def install_traefik_gateway_api():
     cmd("helm repo update")
     
     # Create Traefik values with recommended configuration
-    traefik_values = """
+    traefik_values = ""
 deployment:
   replicas: 1
 
