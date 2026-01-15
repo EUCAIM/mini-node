@@ -433,7 +433,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     os.chdir("..")
 
-def ensure_ingress_addon():"
+def ensure_ingress_addon():
     print("Checking minikube ingress addon...")
     ret = cmd("minikube addons list | grep 'ingress' | grep 'enabled'", exit_on_error=False)
     if ret != 0:
