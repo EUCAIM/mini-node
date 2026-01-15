@@ -30,7 +30,7 @@ def cmd(command, exit_on_error=True):
 
 ## To get command output as string
 def cmd_output(command):
-    """Execute command and return output as string"""
+    '''Execute command and return output as string'''
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
         return result.stdout
@@ -49,7 +49,7 @@ guacamole_user_creator_password = generate_random_password(24)
 
 ## Update YAML files
 def update_yaml_config(file_path, update_func):
-    """Generic function to update YAML configuration files"""
+    '''Generic function to update YAML configuration files'''
     with open(file_path) as f:
         docs = list(yaml.safe_load_all(f))
     
@@ -74,7 +74,7 @@ def update_yaml_config(file_path, update_func):
 
 ## It updates the tracer variable on the 2-dataset-service.yaml with the one indicated by the user
 def configure_tracer_service(config, tracer_url=None):
-    """Configure or disable tracer service in configuration"""
+    '''Configure or disable tracer service in configuration'''
     if "tracer" in config:
         if tracer_url:
             config["tracer"]["url"] = tracer_url
@@ -89,7 +89,7 @@ def configure_tracer_service(config, tracer_url=None):
 
 
 def update_postgres_password(file_path, password, env_var_name="POSTGRES_PASSWORD"):
-    """Update PostgreSQL password in deployment YAML"""
+    '''Update PostgreSQL password in deployment YAML'''
     def update_password(docs):
         updated = False
         for doc in docs:
@@ -112,7 +112,7 @@ def update_postgres_password(file_path, password, env_var_name="POSTGRES_PASSWOR
         return False
 ## Delete stuck PVs by removing finalizers
 def force_cleanup_pvs():
-    """Force cleanup of stuck PVs by removing finalizers"""
+    '''Force cleanup of stuck PVs by removing finalizers'''
     print("Force cleaning up stuck PVs...")
     
     ret = cmd("minikube kubectl -- get pv --no-headers | grep Terminating", exit_on_error=False)
@@ -198,7 +198,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     keycloak_deploy_file = "dep3_keycloak_v4.yaml"
     
     def update_keycloak_deployment(docs):
-        """Update Keycloak deployment configuration"""
+        '''Update Keycloak deployment configuration'''
         updated = False
         for doc in docs:
             if doc.get("kind") == "Deployment":
@@ -445,7 +445,7 @@ def ensure_ingress_addon():
         print(" Ingress addon already enabled")
 
 def install_traefik_gateway_api():
-    """Install Traefik with Gateway API support (NEW - replaces nginx-ingress)"""
+    '''Install Traefik with Gateway API support (NEW - replaces nginx-ingress)'''
     print("\n" + "="*80)
     print(" Installing Traefik with Gateway API support")
     print("="*80 + "\n")
@@ -466,58 +466,58 @@ def install_traefik_gateway_api():
     cmd("helm repo update")
     
     # Create Traefik values with recommended configuration
-    traefik_values = ""
-deployment:
-  replicas: 1
-
-providers:
-  kubernetesGateway:
-    enabled: true
-
-# Disable the chart's automatic Gateway creation - we create our own
-gateway:
-  enabled: false
-
-service:
-  enabled: true
-  type: LoadBalancer
-
-logs:
-  general:
-    level: INFO
-  access:
-    enabled: true
-
-ports:
-  web:
-    port: 8000
-    exposedPort: 80
-    protocol: TCP
-  websecure:
-    port: 8443
-    exposedPort: 443
-    protocol: TCP
-    tls:
-      enabled: true
-
-metrics:
-  prometheus:
-    enabled: true
-
-resources:
-  requests:
-    cpu: "100m"
-    memory: "128Mi"
-  limits:
-    cpu: "500m"
-    memory: "256Mi"
-
-# Important: Configure timeouts and body size limits
-additionalArguments:
-  - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=300s"
-  - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=300s"
-  - "--serversTransport.maxIdleConnsPerHost=100"
-"""
+    traefik_values = (
+        "deployment:\n"
+        "  replicas: 1\n"
+        "\n"
+        "providers:\n"
+        "  kubernetesGateway:\n"
+        "    enabled: true\n"
+        "\n"
+        "# Disable the chart's automatic Gateway creation - we create our own\n"
+        "gateway:\n"
+        "  enabled: false\n"
+        "\n"
+        "service:\n"
+        "  enabled: true\n"
+        "  type: LoadBalancer\n"
+        "\n"
+        "logs:\n"
+        "  general:\n"
+        "    level: INFO\n"
+        "  access:\n"
+        "    enabled: true\n"
+        "\n"
+        "ports:\n"
+        "  web:\n"
+        "    port: 8000\n"
+        "    exposedPort: 80\n"
+        "    protocol: TCP\n"
+        "  websecure:\n"
+        "    port: 8443\n"
+        "    exposedPort: 443\n"
+        "    protocol: TCP\n"
+        "    tls:\n"
+        "      enabled: true\n"
+        "\n"
+        "metrics:\n"
+        "  prometheus:\n"
+        "    enabled: true\n"
+        "\n"
+        "resources:\n"
+        "  requests:\n"
+        "    cpu: \"100m\"\n"
+        "    memory: \"128Mi\"\n"
+        "  limits:\n"
+        "    cpu: \"500m\"\n"
+        "    memory: \"256Mi\"\n"
+        "\n"
+        "# Important: Configure timeouts and body size limits\n"
+        "additionalArguments:\n"
+        "  - \"--entrypoints.websecure.transport.respondingTimeouts.readTimeout=300s\"\n"
+        "  - \"--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=300s\"\n"
+        "  - \"--serversTransport.maxIdleConnsPerHost=100\"\n"
+    )
     
     # Write values to temp file
     values_file = "/tmp/traefik-gateway-values.yaml"
@@ -542,7 +542,7 @@ additionalArguments:
     print(" To access: kubectl port-forward -n traefik svc/traefik 9000:9000\n")
 
 def create_main_gateway(domain: str, use_tls: bool = True):
-    """Create the main Gateway resource for Gateway API"""
+    '''Create the main Gateway resource for Gateway API'''
     print("\n" + "="*80)
     print(f" Creating main Gateway for domain: {domain}")
     print("="*80 + "\n")
@@ -550,38 +550,40 @@ def create_main_gateway(domain: str, use_tls: bool = True):
     # Sanitize domain for secret name (replace dots with dashes)
     secret_name = domain.replace('.', '-') + '-tls'
     
-    gateway_yaml = f"""apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: main-gateway
-  namespace: default
-  annotations:
-    description: "Main Gateway for all services in the cluster"
-spec:
-  gatewayClassName: traefik
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-      allowedRoutes:
-        namespaces:
-          from: All
-"""
+    gateway_yaml = (
+        "apiVersion: gateway.networking.k8s.io/v1\n"
+        "kind: Gateway\n"
+        "metadata:\n"
+        "  name: main-gateway\n"
+        "  namespace: default\n"
+        "  annotations:\n"
+        '    description: "Main Gateway for all services in the cluster"\n'
+        "spec:\n"
+        "  gatewayClassName: traefik\n"
+        "  listeners:\n"
+        "    - name: http\n"
+        "      protocol: HTTP\n"
+        "      port: 80\n"
+        "      allowedRoutes:\n"
+        "        namespaces:\n"
+        "          from: All\n"
+    )
     
     if use_tls:
-        gateway_yaml += f"""    - name: https
-      protocol: HTTPS
-      port: 443
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - kind: Secret
-            name: {secret_name}
-            namespace: default
-      allowedRoutes:
-        namespaces:
-          from: All
-"""
+        gateway_yaml += (
+            "    - name: https\n"
+            "      protocol: HTTPS\n"
+            "      port: 443\n"
+            "      tls:\n"
+            "        mode: Terminate\n"
+            "        certificateRefs:\n"
+            "          - kind: Secret\n"
+            f"            name: {secret_name}\n"
+            "            namespace: default\n"
+            "      allowedRoutes:\n"
+            "        namespaces:\n"
+            "          from: All\n"
+        )
     
     # Write to temp file and apply
     gateway_file = "/tmp/main-gateway.yaml"
@@ -609,7 +611,7 @@ spec:
 
 
 def setup_gateway_or_ingress(use_gateway_api: bool = True):
-    """Setup either Gateway API (Traefik) or traditional Ingress (nginx)"""
+    '''Setup either Gateway API (Traefik) or traditional Ingress (nginx)'''
     if use_gateway_api:
         print("\n" + "="*80)
         print(" Setting up Gateway API with Traefik")
@@ -622,7 +624,7 @@ def setup_gateway_or_ingress(use_gateway_api: bool = True):
         ensure_ingress_addon()
 
 def update_ingress_host(ingress_file: str, domain: str):
-    """Update the host in the ingress YAML file"""
+    '''Update the host in the ingress YAML file'''
     import re
     
     if not os.path.exists(ingress_file):
@@ -650,7 +652,7 @@ def update_ingress_host(ingress_file: str, domain: str):
     print(f" Updated {ingress_file} host to: {domain}")
 
 def create_dataset_service_pvcs():
-    """Create PVCs for dataset-service"""
+    '''Create PVCs for dataset-service'''
     print("  Creating dataset-service PVCs...")
     
     dataset_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service")
@@ -774,7 +776,7 @@ def install_dataset_service(auth_client_secret: str):
             db_service_file = result_db if isinstance(result_db, str) else db_service_file
 
         def update_dataset_service_deployment(docs):
-            """Update dataset-service deployment configuration"""
+            '''Update dataset-service deployment configuration'''
             import json
             updated = False
             for doc in docs:
@@ -903,7 +905,7 @@ def install_dataset_service(auth_client_secret: str):
         os.chdir(prev_dir)
 
 def install_dataset_explorer(CONFIG):
-    """Build and deploy dataset-explorer UI to be served by dataset-service"""
+    '''Build and deploy dataset-explorer UI to be served by dataset-service'''
     print(f"\n{'='*80}")
     print(" Installing Dataset Explorer UI")
     print(f"{'='*80}\n")
@@ -1205,7 +1207,7 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
 
 ## 
 def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_client_secrets, guacamole_user_creator_password: str):
-    """Configure the user-management-job-template.yaml with correct domains and passwords"""
+    '''Configure the user-management-job-template.yaml with correct domains and passwords'''
     print(f"\n{'='*80}")
     print(" Configuring User Management Job Template")
     print(f"{'='*80}\n")
@@ -1231,15 +1233,16 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     # Get the service account token
     print(f" Retrieving service account token...")
     # Create a secret for the service account token
-    secret_yaml = """apiVersion: v1
-kind: Secret
-metadata:
-  name: user-management-sa-token
-  namespace: dataset-service
-  annotations:
-    kubernetes.io/service-account.name: user-management-sa
-type: kubernetes.io/service-account-token
-"""
+    secret_yaml = (
+        "apiVersion: v1\n"
+        "kind: Secret\n"
+        "metadata:\n"
+        "  name: user-management-sa-token\n"
+        "  namespace: dataset-service\n"
+        "  annotations:\n"
+        "    kubernetes.io/service-account.name: user-management-sa\n"
+        "type: kubernetes.io/service-account-token\n"
+    )
     with open("/tmp/user-management-sa-secret.yaml", "w") as f:
         f.write(secret_yaml)
     
@@ -1317,7 +1320,7 @@ type: kubernetes.io/service-account-token
     print(f"\n Guacamole user credentials saved to: {password_file}")
 
 def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
-    """Install DSWS Operator for managing dataset workspaces"""
+    '''Install DSWS Operator for managing dataset workspaces'''
     prev_dir = os.getcwd()
     try:
         print(f"\n{'='*80}")
@@ -1421,7 +1424,7 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
         os.chdir(prev_dir)
 
 def install_kubeapps(CONFIG, client_kubernetes_secret: str):
-    """Install Kubeapps dashboard for managing Helm charts"""
+    '''Install Kubeapps dashboard for managing Helm charts'''
     prev_dir = os.getcwd()
     try:
         print(f"\n{'='*80}")
@@ -1602,7 +1605,7 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         os.chdir(prev_dir)
 
 def install_cert_manager(CONFIG):
-    """Install cert-manager for automatic TLS certificate management"""
+    '''Install cert-manager for automatic TLS certificate management'''
     print("Installing cert-manager...")
     
     cert_manager_success = False
@@ -1679,7 +1682,7 @@ def install_cert_manager(CONFIG):
 
 
 def create_letsencrypt_issuer(CONFIG):
-    """Create Let's Encrypt ClusterIssuer for automatic certificate generation"""
+    '''Create Let's Encrypt ClusterIssuer for automatic certificate generation'''
     if not hasattr(CONFIG, 'letsencrypt') or not hasattr(CONFIG.letsencrypt, 'email'):
         print("Warning: No Let's Encrypt email configured, skipping ClusterIssuer creation")
         return
@@ -1715,7 +1718,7 @@ def create_letsencrypt_issuer(CONFIG):
 
 
 def install_api_gateway(CONFIG):
-    """Install the main API Gateway with TLS certificate from YAML file"""
+    '''Install the main API Gateway with TLS certificate from YAML file'''
     print("\n" + "="*80)
     print(" Installing API Gateway")
     print("="*80 + "\n")
@@ -1778,7 +1781,7 @@ def install_api_gateway(CONFIG):
 
 
 def create_iptables_rules_script():
-    """Create and apply iptables rules for external access to minikube ingress"""
+    '''Create and apply iptables rules for external access to minikube ingress'''
     print("Setting up iptables rules for external access...")
     
     # Get ingress-nginx service info to extract nodeports
@@ -1907,60 +1910,61 @@ def create_iptables_rules_script():
         print("Not running as root - iptables rules will be applied on network startup")
     
     # Create the persistent script content with ONLY interface-specific rules
-    script_content = f"""#!/bin/bash
-# Mininode iptables rules for external access to minikube ingress
-# Auto-generated by install.py
-# IMPORTANT: Only using interface-specific rules to preserve minikube connectivity
-# External interface: {external_interface}
-# Minikube IP: {minikube_ip}
-
-echo "Setting up interface-specific NAT rules for external access..."
-echo "External interface: {external_interface}"
-
-# Interface-specific NAT rules ONLY (preserves minikube's own connectivity)
-if ! iptables -t nat -C PREROUTING -i {external_interface} -p tcp --dport 80 -j DNAT --to-destination {minikube_ip}:{http_nodeport} 2>/dev/null; then
-    echo "Adding interface-specific NAT rule for HTTP on {external_interface}"
-    iptables -t nat -A PREROUTING -i {external_interface} -p tcp --dport 80 -j DNAT --to-destination {minikube_ip}:{http_nodeport}
-else
-    echo "Interface-specific NAT rule for HTTP on {external_interface} already exists, skipping"
-fi
-
-if ! iptables -t nat -C PREROUTING -i {external_interface} -p tcp --dport 443 -j DNAT --to-destination {minikube_ip}:{https_nodeport} 2>/dev/null; then
-    echo "Adding interface-specific NAT rule for HTTPS on {external_interface}"
-    iptables -t nat -A PREROUTING -i {external_interface} -p tcp --dport 443 -j DNAT --to-destination {minikube_ip}:{https_nodeport}
-else
-    echo "Interface-specific NAT rule for HTTPS on {external_interface} already exists, skipping"
-fi
-
-# FORWARD rules to accept forwarded packets
-echo "Setting up FORWARD rules..."
-
-if ! iptables -C FORWARD -p tcp -d {minikube_ip} --dport {http_nodeport} -j ACCEPT 2>/dev/null; then
-    echo "Adding FORWARD rule for HTTP traffic"
-    iptables -I FORWARD 1 -p tcp -d {minikube_ip} --dport {http_nodeport} -j ACCEPT
-else
-    echo "FORWARD rule for HTTP traffic already exists, skipping"
-fi
-
-if ! iptables -C FORWARD -p tcp -d {minikube_ip} --dport {https_nodeport} -j ACCEPT 2>/dev/null; then
-    echo "Adding FORWARD rule for HTTPS traffic"
-    iptables -I FORWARD 1 -p tcp -d {minikube_ip} --dport {https_nodeport} -j ACCEPT
-else
-    echo "FORWARD rule for HTTPS traffic already exists, skipping"
-fi
-
-echo "Mininode iptables rules configuration completed"
-echo "External interface: {external_interface}"
-echo "HTTP traffic (port 80) -> {minikube_ip}:{http_nodeport}"
-echo "HTTPS traffic (port 443) -> {minikube_ip}:{https_nodeport}"
-echo ""
-echo "NOTE: These rules only affect traffic coming from {external_interface}"
-echo "Minikube's own connectivity to external services is preserved."
-echo ""
-echo "You can verify the rules with:"
-echo "  sudo iptables -t nat -L PREROUTING -n --line-numbers"
-echo "  sudo iptables -L FORWARD -n --line-numbers"
-"""
+    script_content = (
+        "#!/bin/bash\n"
+        "# Mininode iptables rules for external access to minikube ingress\n"
+        "# Auto-generated by install.py\n"
+        "# IMPORTANT: Only using interface-specific rules to preserve minikube connectivity\n"
+        f"# External interface: {external_interface}\n"
+        f"# Minikube IP: {minikube_ip}\n"
+        "\n"
+        'echo "Setting up interface-specific NAT rules for external access..."\n'
+        f'echo "External interface: {external_interface}"\n'
+        "\n"
+        "# Interface-specific NAT rules ONLY (preserves minikube's own connectivity)\n"
+        f"if ! iptables -t nat -C PREROUTING -i {external_interface} -p tcp --dport 80 -j DNAT --to-destination {minikube_ip}:{http_nodeport} 2>/dev/null; then\n"
+        f'    echo "Adding interface-specific NAT rule for HTTP on {external_interface}"\n'
+        f"    iptables -t nat -A PREROUTING -i {external_interface} -p tcp --dport 80 -j DNAT --to-destination {minikube_ip}:{http_nodeport}\n"
+        "else\n"
+        f'    echo "Interface-specific NAT rule for HTTP on {external_interface} already exists, skipping"\n'
+        "fi\n"
+        "\n"
+        f"if ! iptables -t nat -C PREROUTING -i {external_interface} -p tcp --dport 443 -j DNAT --to-destination {minikube_ip}:{https_nodeport} 2>/dev/null; then\n"
+        f'    echo "Adding interface-specific NAT rule for HTTPS on {external_interface}"\n'
+        f"    iptables -t nat -A PREROUTING -i {external_interface} -p tcp --dport 443 -j DNAT --to-destination {minikube_ip}:{https_nodeport}\n"
+        "else\n"
+        f'    echo "Interface-specific NAT rule for HTTPS on {external_interface} already exists, skipping"\n'
+        "fi\n"
+        "\n"
+        "# FORWARD rules to accept forwarded packets\n"
+        'echo "Setting up FORWARD rules..."\n'
+        "\n"
+        f"if ! iptables -C FORWARD -p tcp -d {minikube_ip} --dport {http_nodeport} -j ACCEPT 2>/dev/null; then\n"
+        '    echo "Adding FORWARD rule for HTTP traffic"\n'
+        f"    iptables -I FORWARD 1 -p tcp -d {minikube_ip} --dport {http_nodeport} -j ACCEPT\n"
+        "else\n"
+        '    echo "FORWARD rule for HTTP traffic already exists, skipping"\n'
+        "fi\n"
+        "\n"
+        f"if ! iptables -C FORWARD -p tcp -d {minikube_ip} --dport {https_nodeport} -j ACCEPT 2>/dev/null; then\n"
+        '    echo "Adding FORWARD rule for HTTPS traffic"\n'
+        f"    iptables -I FORWARD 1 -p tcp -d {minikube_ip} --dport {https_nodeport} -j ACCEPT\n"
+        "else\n"
+        '    echo "FORWARD rule for HTTPS traffic already exists, skipping"\n'
+        "fi\n"
+        "\n"
+        'echo "Mininode iptables rules configuration completed"\n'
+        f'echo "External interface: {external_interface}"\n'
+        f'echo "HTTP traffic (port 80) -> {minikube_ip}:{http_nodeport}"\n'
+        f'echo "HTTPS traffic (port 443) -> {minikube_ip}:{https_nodeport}"\n'
+        'echo ""\n'
+        f'echo "NOTE: These rules only affect traffic coming from {external_interface}"\n'
+        'echo "Minikube\'s own connectivity to external services is preserved."\n'
+        'echo ""\n'
+        'echo "You can verify the rules with:"\n'
+        'echo "  sudo iptables -t nat -L PREROUTING -n --line-numbers"\n'
+        'echo "  sudo iptables -L FORWARD -n --line-numbers"\n'
+    )
     
     # Create persistent script
     if os.geteuid() != 0:
@@ -2009,7 +2013,7 @@ echo "  sudo iptables -L FORWARD -n --line-numbers"
         print(f"To verify rules: sudo iptables -t nat -L PREROUTING -n --line-numbers")
 
 def install_traefik_gateway_api():
-    """Install Traefik with Gateway API support instead of nginx-ingress"""
+    '''Install Traefik with Gateway API support instead of nginx-ingress'''
     prev_dir = os.getcwd()
     try:
         print("Installing Traefik with Gateway API support...")
@@ -2050,41 +2054,43 @@ def install_traefik_gateway_api():
 
 
 def create_main_gateway(domain: str, use_tls: bool = True):
-    """Create the main Gateway resource"""
+    '''Create the main Gateway resource'''
     print(f"Creating main Gateway for domain: {domain}...")
     
-    gateway_yaml = f"""
-apiVersion: gateway.networking.k8s.io/v1
-kind: Gateway
-metadata:
-  name: main-gateway
-  namespace: default
-spec:
-  gatewayClassName: traefik
-  listeners:
-    - name: http
-      protocol: HTTP
-      port: 80
-      allowedRoutes:
-        namespaces:
-          from: All
-"""
+    gateway_yaml = (
+        "\n"
+        "apiVersion: gateway.networking.k8s.io/v1\n"
+        "kind: Gateway\n"
+        "metadata:\n"
+        "  name: main-gateway\n"
+        "  namespace: default\n"
+        "spec:\n"
+        "  gatewayClassName: traefik\n"
+        "  listeners:\n"
+        "    - name: http\n"
+        "      protocol: HTTP\n"
+        "      port: 80\n"
+        "      allowedRoutes:\n"
+        "        namespaces:\n"
+        "          from: All\n"
+    )
     
     if use_tls:
-        gateway_yaml += f"""
-    - name: https
-      protocol: HTTPS
-      port: 443
-      tls:
-        mode: Terminate
-        certificateRefs:
-          - kind: Secret
-            name: {domain.replace('.', '-')}-tls
-            namespace: default
-      allowedRoutes:
-        namespaces:
-          from: All
-"""
+        gateway_yaml += (
+            "\n"
+            "    - name: https\n"
+            "      protocol: HTTPS\n"
+            "      port: 443\n"
+            "      tls:\n"
+            "        mode: Terminate\n"
+            "        certificateRefs:\n"
+            "          - kind: Secret\n"
+            f"            name: {domain.replace('.', '-')}-tls\n"
+            "            namespace: default\n"
+            "      allowedRoutes:\n"
+            "        namespaces:\n"
+            "          from: All\n"
+        )
     
     # Write to temp file and apply
     gateway_file = "/tmp/main-gateway.yaml"
@@ -2101,7 +2107,7 @@ spec:
     print(" Gateway created successfully")
 
 # def convert_ingress_to_httproute(ingress_file: str, domain: str):
-#     """Convert Ingress YAML to HTTPRoute YAML"""
+#     '''Convert Ingress YAML to HTTPRoute YAML'''
 #     if not os.path.exists(ingress_file):
 #         print(f"  Ingress file {ingress_file} not found, skipping conversion...")
 #         return None
@@ -2200,10 +2206,10 @@ spec:
 
 ## update dataset-service kid after Keycloak is running just in case the kid has changed
 def update_dataset_service_kid_from_keycloak(CONFIG):
-    """
+    '''
     Helper function to update the dataset-service kid after Keycloak is running
     Can be called manually or as part of post-installation steps
-    """
+    '''
     print("Updating dataset-service kid from running Keycloak instance...")
     
     try:
@@ -2321,7 +2327,7 @@ def update_dataset_service_kid_from_keycloak(CONFIG):
 
 
 def package_workstation_charts(CONFIG):
-    """Package and publish workstation Helm charts to dataset-service"""
+    '''Package and publish workstation Helm charts to dataset-service'''
     prev_dir = os.getcwd()
     try:
         print(f"\n{'='*80}")
@@ -2433,18 +2439,21 @@ def package_workstation_charts(CONFIG):
         os.chdir(prev_dir)
 
 def install_qpi(CONFIG):
-
+    '''
+    Placeholder for installing the qpi service.
+    '''
+    # TODO: Implement the installation steps for qpi service
     pass
 
 def install_jobman_service(CONFIG):
-    """
+    '''
     Placeholder for installing the jobman service.
-    """
+    '''
     # TODO: Implement the installation steps for jobman service
     print("Installing jobman service (not yet implemented)")
 
 def apply_pod_priorities():
-    """Apply pod priority classes from extra-configurations"""
+    '''Apply pod priority classes from extra-configurations'''
     print(f"\n{'='*80}")
     print(" Applying Pod Priority Classes")
     print(f"{'='*80}\n")
