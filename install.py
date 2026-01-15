@@ -9,19 +9,26 @@ import random
 import yaml
 import subprocess
 import time
+import sys
+
+from keycloak_admin_api import KeycloakAdminAPIClient
+from auth import AuthClient
 from config import *
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_FILE_PATH = "config.private.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
+##WHY None?  Because CONFIG is set later after parsing args in main
 CONFIG = None
 
+## Function to execute shell commands 
 def cmd(command, exit_on_error=True):
     print(command)
     ret = os.system(command)
     if exit_on_error and ret != 0: exit(1)
     return ret
 
+## To get command output as string
 def cmd_output(command):
     """Execute command and return output as string"""
     try:
@@ -31,10 +38,16 @@ def cmd_output(command):
         print(f"Error executing command: {e}")
         return ""
 
+
 def generate_random_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choice(alphabet) for _ in range(length))
 
+## Generate guacamole admin password globally (after function definition)
+guacamole_user_creator_password = generate_random_password(24)
+
+
+## Update YAML files
 def update_yaml_config(file_path, update_func):
     """Generic function to update YAML configuration files"""
     with open(file_path) as f:
@@ -43,42 +56,23 @@ def update_yaml_config(file_path, update_func):
     updated = update_func(docs)
     
     if updated:
-        with open(file_path, 'w') as f:
-            yaml.safe_dump_all(docs, f, sort_keys=False)
-        return True
+        # If file is in k8s-deploy-node directory, create edited copy
+        if 'k8s-deploy-node' in file_path:
+            # Create new file path with .edited.yaml suffix
+            base_path = file_path.rsplit('.', 1)[0]  # Remove extension
+            edited_file_path = base_path + '.edited.yaml'
+            with open(edited_file_path, 'w') as f:
+                yaml.safe_dump_all(docs, f, sort_keys=False)
+            print(f"Created edited copy: {edited_file_path}")
+            return edited_file_path
+        else:
+            # For non-k8s-deploy-node files, edit in place
+            with open(file_path, 'w') as f:
+                yaml.safe_dump_all(docs, f, sort_keys=False)
+            return True
     return False
 
-def update_ingress_host(ingress_file, domain):
-    """Update host in ingress YAML file"""
-    if not os.path.exists(ingress_file):
-        print(f"  Ingress file {ingress_file} not found, skipping...")
-        return False
-    
-    def update_hosts(docs):
-        updated = False
-        for doc in docs:
-            if doc.get("kind") == "Ingress":
-                for rule in doc["spec"].get("rules", []):
-                    rule["host"] = domain
-                    updated = True
-                if "tls" in doc["spec"]:
-                    for tls_entry in doc["spec"]["tls"]:
-                        if "hosts" in tls_entry:
-                            tls_entry["hosts"] = [domain]
-                            updated = True
-        return updated
-    
-    if update_yaml_config(ingress_file, update_hosts):
-        print(f" Updated {ingress_file} host to: {domain}")
-        return True
-    return False
-
-def replace_domain_in_config(config_str, domain):
-    """Replace hardcoded domains with configured domain"""
-    config_str = config_str.replace("eucaim-node.i3m.upv.es", domain)
-    config_str = config_str.replace("mininode.imaging.i3m.upv.es", domain)
-    return config_str
-
+## It updates the tracer variable on the 2-dataset-service.yaml with the one indicated by the user
 def configure_tracer_service(config, tracer_url=None):
     """Configure or disable tracer service in configuration"""
     if "tracer" in config:
@@ -93,6 +87,7 @@ def configure_tracer_service(config, tracer_url=None):
         print(" Tracer service disabled (added empty configuration)")
     return config
 
+
 def update_postgres_password(file_path, password, env_var_name="POSTGRES_PASSWORD"):
     """Update PostgreSQL password in deployment YAML"""
     def update_password(docs):
@@ -106,13 +101,16 @@ def update_postgres_password(file_path, password, env_var_name="POSTGRES_PASSWOR
                             updated = True
         return updated
     
-    if update_yaml_config(file_path, update_password):
-        print(f"Injected password into {env_var_name} in {file_path}")
-        return True
+    result = update_yaml_config(file_path, update_password)
+    if result:
+        # If result is a string, it's the edited file path
+        edited_path = result if isinstance(result, str) else file_path
+        print(f"Injected password into {env_var_name} in {edited_path}")
+        return edited_path
     else:
         print(f"Warning: Could not find {env_var_name} to update password.")
         return False
-
+## Delete stuck PVs by removing finalizers
 def force_cleanup_pvs():
     """Force cleanup of stuck PVs by removing finalizers"""
     print("Force cleaning up stuck PVs...")
@@ -128,6 +126,7 @@ def force_cleanup_pvs():
             cmd(f"minikube kubectl -- patch pv {pv} -p '{{\"metadata\":{{\"finalizers\":null}}}}' --type=merge || true")
         cmd("sleep 5")
 
+## Class to manage Keycloak client secrets find them if existing to avoid conflicts or generate new ones 
 class Auth_client_secrets():
     def __init__(self):
         private_realm_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.private.json")
@@ -138,6 +137,7 @@ class Auth_client_secrets():
                 import json
                 with open(private_realm_file, 'r') as f:
                     realm_data = json.load(f)
+## Read all existing client secrets
                     for client in realm_data.get('clients', []):
                         client_id = client.get('clientId')
                         secret = client.get('secret')
@@ -161,7 +161,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     keycloak_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak")
     os.chdir(keycloak_path)
     
-    # Force cleanup of stuck PVs first
+## Force cleanup of stuck PVs first
     force_cleanup_pvs()
     
     print("Cleaning up existing Keycloak resources (preserving ingress, certificates, and secrets)...")
@@ -194,66 +194,171 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     update_postgres_password("dep2_database.yaml", CONFIG.keycloak.db_password)
 
-    # Inject Keycloak deployment changes
     realm_config_file_private = "eucaim-node-realm.private.json" 
     keycloak_deploy_file = "dep3_keycloak_v4.yaml"
-    with open(keycloak_deploy_file) as f:
-        docs = list(yaml.safe_load_all(f))
-    updated = False
-    for doc in docs:
-        if doc.get("kind") == "Deployment":
-            for env in doc["spec"]["template"]["spec"]["containers"][0].get("env", []):
-                if env.get("name") == "KC_BOOTSTRAP_ADMIN_USERNAME":
-                    env["value"] = CONFIG.keycloak.admin_username
+    
+    def update_keycloak_deployment(docs):
+        """Update Keycloak deployment configuration"""
+        updated = False
+        for doc in docs:
+            if doc.get("kind") == "Deployment":
+                for env in doc["spec"]["template"]["spec"]["containers"][0].get("env", []):
+                    if env.get("name") == "KC_BOOTSTRAP_ADMIN_USERNAME":
+                        env["value"] = CONFIG.keycloak.admin_username
+                        updated = True
+                    elif env.get("name") == "KC_BOOTSTRAP_ADMIN_PASSWORD":
+                        env["value"] = CONFIG.keycloak.admin_password
+                        updated = True
+                    elif env.get("name") == "KC_DB_PASSWORD":
+                        env["value"] = CONFIG.keycloak.db_password
+                        updated = True
+                    elif env.get("name") == "KC_SPI_EVENTS_LISTENER_EMAIL_TO_ADMIN_EMAIL_RECEIVERS":
+                        env["value"] = CONFIG.keycloak.admin_emails
+                        updated = True
+                    elif env.get("name") == "KC_HOSTNAME":
+                        env["value"] = CONFIG.public_domain
+                        updated = True
+                
+                if not any("--import-realm" in str(param) for param in doc["spec"]["template"]["spec"]["containers"][0].get("args", [])):
+                    doc["spec"]["template"]["spec"]["containers"][0]["args"].append("--import-realm")
                     updated = True
-                elif env.get("name") == "KC_BOOTSTRAP_ADMIN_PASSWORD":
-                    env["value"] = CONFIG.keycloak.admin_password
+                
+                if not any(mount["subPath"] == realm_config_file_private for mount in doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]):
+                    doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append({
+                        "name": "vol-standalone-deployments",
+                        "subPath": realm_config_file_private,
+                        "mountPath": "/opt/keycloak/data/import/" + realm_config_file_private
+                    })
                     updated = True
-                elif env.get("name") == "KC_DB_PASSWORD":
-                    env["value"] = CONFIG.keycloak.db_password
-                    updated = True
-                elif env.get("name") == "KC_SPI_EVENTS_LISTENER_EMAIL_TO_ADMIN_EMAIL_RECEIVERS":
-                    env["value"] = CONFIG.keycloak.admin_emails
-                    updated = True
-                elif env.get("name") == "KC_HOSTNAME":
-                    env["value"] = CONFIG.public_domain
-                    updated = True
-            
-            if not any("--import-realm" in str(param) for param in doc["spec"]["template"]["spec"]["containers"][0].get("args", [])):
-                doc["spec"]["template"]["spec"]["containers"][0]["args"].append("--import-realm")
-                updated = True
-            
-            if not any(mount["subPath"] == realm_config_file_private for mount in doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]):
-                doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append({
-                    "name": "vol-standalone-deployments",
-                    "subPath": realm_config_file_private,
-                    "mountPath": "/opt/keycloak/data/import/" + realm_config_file_private
-                })
-                updated = True
-    if updated:
-        with open(keycloak_deploy_file, 'w') as f:
-            yaml.safe_dump_all(docs, f, sort_keys=False)
+        return updated
+    
+    result = update_yaml_config(keycloak_deploy_file, update_keycloak_deployment)
+    if result:
+        # If result is a string, it's the edited file path
+        keycloak_deploy_file = result if isinstance(result, str) else keycloak_deploy_file
         print(f"Injected config values into {keycloak_deploy_file}")
+    
+    # OLD CODE (commented for safety):
+    # with open(keycloak_deploy_file) as f:
+    #     docs = list(yaml.safe_load_all(f))
+    # updated = False
+    # for doc in docs:
+    #     if doc.get("kind") == "Deployment":
+    #         for env in doc["spec"]["template"]["spec"]["containers"][0].get("env", []):
+    #             if env.get("name") == "KC_BOOTSTRAP_ADMIN_USERNAME":
+    #                 env["value"] = CONFIG.keycloak.admin_username
+    #                 updated = True
+    #             elif env.get("name") == "KC_BOOTSTRAP_ADMIN_PASSWORD":
+    #                 env["value"] = CONFIG.keycloak.admin_password
+    #                 updated = True
+    #             elif env.get("name") == "KC_DB_PASSWORD":
+    #                 env["value"] = CONFIG.keycloak.db_password
+    #                 updated = True
+    #             elif env.get("name") == "KC_SPI_EVENTS_LISTENER_EMAIL_TO_ADMIN_EMAIL_RECEIVERS":
+    #                 env["value"] = CONFIG.keycloak.admin_emails
+    #                 updated = True
+    #             elif env.get("name") == "KC_HOSTNAME":
+    #                 env["value"] = CONFIG.public_domain
+    #                 updated = True
+    #         
+    #         if not any("--import-realm" in str(param) for param in doc["spec"]["template"]["spec"]["containers"][0].get("args", [])):
+    #             doc["spec"]["template"]["spec"]["containers"][0]["args"].append("--import-realm")
+    #             updated = True
+    #         
+    #         if not any(mount["subPath"] == realm_config_file_private for mount in doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]):
+    #             doc["spec"]["template"]["spec"]["containers"][0]["volumeMounts"].append({
+    #                 "name": "vol-standalone-deployments",
+    #                 "subPath": realm_config_file_private,
+    #                 "mountPath": "/opt/keycloak/data/import/" + realm_config_file_private
+    #             })
+    #             updated = True
+    # if updated:
+    #     with open(keycloak_deploy_file, 'w') as f:
+    #         yaml.safe_dump_all(docs, f, sort_keys=False)
+    #     print(f"Injected config values into {keycloak_deploy_file}")
 
     # Verify namespace is ready before applying resources
     print("Verifying namespace is ready...")
     cmd("minikube kubectl -- get namespace keycloak")
     
-    # Apply storage init manifests
     cmd("minikube kubectl -- apply -f dep0_volumes.yaml -n keycloak")
     cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
 
     jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
-    cmd(f"wget -O /tmp/keycloak-event-listener-email-to-admin-1.0.6.jar '{jar1_url}' || true")
-    cmd(f"wget -O /tmp/keycloak-required-action-user-validated-1.0.5.jar '{jar2_url}' || true")
+    jar1_path = "/tmp/keycloak-event-listener-email-to-admin-1.0.6.jar"
+    jar2_path = "/tmp/keycloak-required-action-user-validated-1.0.5.jar"
+    
+    print("Downloading Keycloak extension JARs...")
+    for jar_url, jar_path in [(jar1_url, jar1_path), (jar2_url, jar2_path)]:
+        max_retries = 5
+        success = False
+        
+        for attempt in range(max_retries):
+            # Remove old file if exists
+            cmd(f"rm -f {jar_path}", exit_on_error=False)
+            
+            # Try wget first (with increased timeout and retries)
+            print(f"  Attempt {attempt + 1}/{max_retries}: Downloading {os.path.basename(jar_path)}...")
+            download_result = cmd(
+                f"wget --timeout=60 --tries=3 --retry-connrefused --waitretry=5 "
+                f"--user-agent='Mozilla/5.0' -O {jar_path} '{jar_url}'", 
+                exit_on_error=False
+            )
+            
+            # If wget fails, try curl as fallback
+            if download_result != 0:
+                print(f"    wget failed, trying curl...")
+                download_result = cmd(
+                    f"curl -L --max-time 60 --retry 3 --retry-delay 5 "
+                    f"-A 'Mozilla/5.0' -o {jar_path} '{jar_url}'",
+                    exit_on_error=False
+                )
+            
+            if download_result == 0 and os.path.exists(jar_path):
+                # Verify file size (JARs should be > 5KB)
+                file_size = os.path.getsize(jar_path)
+                if file_size < 5000:
+                    print(f"    Downloaded file too small ({file_size} bytes), likely error page")
+                    continue
+                
+                # Verify it's a valid ZIP/JAR file
+                verify_result = cmd(f"unzip -t {jar_path} >/dev/null 2>&1", exit_on_error=False)
+                if verify_result == 0:
+                    print(f"  ✓ Downloaded and verified: {os.path.basename(jar_path)} ({file_size} bytes)")
+                    success = True
+                    break
+                else:
+                    print(f"    File corrupted (invalid ZIP/JAR)")
+            else:
+                print(f"    Download failed")
+            
+            # Wait before retry (exponential backoff)
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"    Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+        
+        if not success:
+            print(f"\n  WARNING: Could not download {os.path.basename(jar_path)} after {max_retries} attempts")
+            print(f"   URL: {jar_url}")
+            print(f"   Keycloak may not work properly without this extension")
+            print(f"   You can manually download it later and copy to /var/hostpath-provisioner/keycloak/standalone-deployments/\n")
 
     cmd("tar -czf /tmp/themes.tar.gz themes/")
     cmd("minikube cp /tmp/themes.tar.gz minikube:/tmp/")
     cmd("minikube ssh -- 'sudo tar -xzf /tmp/themes.tar.gz -C /var/hostpath-provisioner/keycloak/themes-data/ --strip-components=1'")
 
-    cmd("minikube cp /tmp/keycloak-event-listener-email-to-admin-1.0.6.jar minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
-    cmd("minikube cp /tmp/keycloak-required-action-user-validated-1.0.5.jar minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+    # Only copy JARs if they were successfully downloaded and validated
+    if os.path.exists(jar1_path) and os.path.getsize(jar1_path) > 0:
+        cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+    else:
+        print(f"  Warning: Skipping corrupted JAR: {jar1_path}")
+    
+    if os.path.exists(jar2_path) and os.path.getsize(jar2_path) > 0:
+        cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+    else:
+        print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
 
     realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
     realm_config_file_private_path = os.path.join(os.getcwd(), realm_config_file_private)
@@ -277,50 +382,244 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     cmd("minikube kubectl -- wait --for=condition=ready pod -l app=db -n keycloak --timeout=300s")
     cmd("sleep 30")
    
-    cmd("minikube kubectl -- apply -f dep3_keycloak_v4.yaml -n keycloak")
+    cmd(f"minikube kubectl -- apply -f {keycloak_deploy_file} -n keycloak")
 
-    ingress_file = "dep4_ingress.yaml"
-    tls_ingress_file = "dep4_ingress_tls.yaml"
+    # Check if we should use Gateway API or traditional Ingress
+    use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
     
     use_tls = (hasattr(CONFIG, 'letsencrypt') and 
                hasattr(CONFIG.letsencrypt, 'email') and 
                CONFIG.letsencrypt.email and
                getattr(CONFIG, 'cert_manager_available', False))
     
-    if not getattr(CONFIG, 'cert_manager_available', False):
-        print("Note: Using HTTP-only ingress (cert-manager not available)")
-    
-    selected_ingress = tls_ingress_file if use_tls else ingress_file
-    update_ingress_host(selected_ingress, CONFIG.public_domain)
-
-    print("Checking if ingress already exists...")
-    ingress_exists = cmd(f"minikube kubectl -- get ingress proxy-keycloak -n keycloak 2>/dev/null", exit_on_error=False)
-    
-    if ingress_exists == 0:
-        print(" Ingress already exists - preserving to avoid certificate recreation")
-        print("   If you need to update the ingress, delete it manually first")
-    else:
-        print("Creating new ingress...")
-        cmd(f"minikube kubectl -- apply -f {selected_ingress} -n keycloak")
+    if use_gateway_api:
+        # NEW: Gateway API with HTTPRoute - apply from YAML file
+        print(f"\n Configuring HTTPRoute for Keycloak (Gateway API)...")
         
-        if use_tls:
-            print("TLS certificate will be automatically provisioned by cert-manager")
+        # Verify Gateway API CRDs are installed
+        crd_check = cmd("minikube kubectl -- get crd httproutes.gateway.networking.k8s.io 2>/dev/null", exit_on_error=False)
+        if crd_check != 0:
+            print("  WARNING: Gateway API CRDs not installed yet")
+
+        else:
+            httproute_file = "dep4_httproute.yaml"
+            update_ingress_host(httproute_file, CONFIG.public_domain)
+            
+            cmd(f"minikube kubectl -- apply -f {httproute_file}")
+            print(f" HTTPRoute applied for Keycloak at https://{CONFIG.public_domain}/auth")
+        
+    else:
+        ingress_file = "dep4_ingress.yaml"
+        tls_ingress_file = "dep4_ingress_tls.yaml"
+        
+        if not getattr(CONFIG, 'cert_manager_available', False):
+            print("Note: Using HTTP-only ingress (cert-manager not available)")
+        
+        selected_ingress = tls_ingress_file if use_tls else ingress_file
+        update_ingress_host(selected_ingress, CONFIG.public_domain)
+
+        print("Checking if ingress already exists...")
+        ingress_exists = cmd(f"minikube kubectl -- get ingress proxy-keycloak -n keycloak 2>/dev/null", exit_on_error=False)
+        
+        if ingress_exists == 0:
+            print(" Ingress already exists - preserving to avoid certificate recreation")
+
+        else:
+            print("Creating new ingress...")
+            cmd(f"minikube kubectl -- apply -f {selected_ingress} -n keycloak")
+            
+            if use_tls:
+                print("TLS certificate will be automatically provisioned by cert-manager")
 
     os.chdir("..")
 
-def ensure_ingress_addon():
-    """Ensure minikube ingress addon is enabled"""
+def ensure_ingress_addon():"
     print("Checking minikube ingress addon...")
     ret = cmd("minikube addons list | grep 'ingress' | grep 'enabled'", exit_on_error=False)
     if ret != 0:
         print("Enabling minikube ingress addon...")
         cmd("minikube addons enable ingress")
         print(" Ingress addon enabled")
-        # Wait for ingress controller to be ready
-        print("Waiting for ingress controller to be ready...")
         cmd("minikube kubectl -- wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s || true")
     else:
         print(" Ingress addon already enabled")
+
+def install_traefik_gateway_api():
+    """Install Traefik with Gateway API support (NEW - replaces nginx-ingress)"""
+    print("\n" + "="*80)
+    print(" Installing Traefik with Gateway API support")
+    print("="*80 + "\n")
+    
+    # Check if Traefik is already installed
+    ret = cmd("helm list -n traefik 2>/dev/null | grep traefik", exit_on_error=False)
+    if ret == 0:
+        print(" Traefik already installed")
+        return
+    
+    # Create namespace
+    print("Creating traefik namespace...")
+    cmd("minikube kubectl -- create namespace traefik --dry-run=client -o yaml | minikube kubectl -- apply -f -")
+    
+    # Add Traefik helm repo
+    print("Adding Traefik Helm repository...")
+    cmd("helm repo add traefik https://traefik.github.io/charts")
+    cmd("helm repo update")
+    
+    # Create Traefik values with recommended configuration
+    traefik_values = """
+deployment:
+  replicas: 1
+
+providers:
+  kubernetesGateway:
+    enabled: true
+
+# Disable the chart's automatic Gateway creation - we create our own
+gateway:
+  enabled: false
+
+service:
+  enabled: true
+  type: LoadBalancer
+
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+
+ports:
+  web:
+    port: 8000
+    exposedPort: 80
+    protocol: TCP
+  websecure:
+    port: 8443
+    exposedPort: 443
+    protocol: TCP
+    tls:
+      enabled: true
+
+metrics:
+  prometheus:
+    enabled: true
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+# Important: Configure timeouts and body size limits
+additionalArguments:
+  - "--entrypoints.websecure.transport.respondingTimeouts.readTimeout=300s"
+  - "--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=300s"
+  - "--serversTransport.maxIdleConnsPerHost=100"
+"""
+    
+    # Write values to temp file
+    values_file = "/tmp/traefik-gateway-values.yaml"
+    with open(values_file, 'w') as f:
+        f.write(traefik_values)
+    
+    # Install Traefik
+    print("Installing Traefik via Helm (this may take a minute)...")
+    cmd(f"helm install traefik traefik/traefik -n traefik -f {values_file} --wait --timeout=5m")
+    
+    # Wait for pods to be ready
+    print("Waiting for Traefik pods to be ready...")
+    cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n traefik --timeout=120s")
+    
+    print("\n" + " Traefik installed successfully")
+    
+    # Show GatewayClass
+    print("\nAvailable GatewayClasses:")
+    cmd("minikube kubectl -- get gatewayclass", exit_on_error=False)
+    
+    print("\n INFO: Dashboard available at: http://localhost:9000/dashboard/")
+    print(" To access: kubectl port-forward -n traefik svc/traefik 9000:9000\n")
+
+def create_main_gateway(domain: str, use_tls: bool = True):
+    """Create the main Gateway resource for Gateway API"""
+    print("\n" + "="*80)
+    print(f" Creating main Gateway for domain: {domain}")
+    print("="*80 + "\n")
+    
+    # Sanitize domain for secret name (replace dots with dashes)
+    secret_name = domain.replace('.', '-') + '-tls'
+    
+    gateway_yaml = f"""apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: main-gateway
+  namespace: default
+  annotations:
+    description: "Main Gateway for all services in the cluster"
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+"""
+    
+    if use_tls:
+        gateway_yaml += f"""    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {secret_name}
+            namespace: default
+      allowedRoutes:
+        namespaces:
+          from: All
+"""
+    
+    # Write to temp file and apply
+    gateway_file = "/tmp/main-gateway.yaml"
+    with open(gateway_file, 'w') as f:
+        f.write(gateway_yaml)
+    
+    print(f"Applying Gateway configuration...")
+    cmd(f"minikube kubectl -- apply -f {gateway_file}")
+    
+    # Wait for gateway to be ready
+    print("Waiting for Gateway to be ready...")
+    time.sleep(5)
+    ret = cmd("minikube kubectl -- wait --for=condition=Programmed gateway/main-gateway -n default --timeout=60s", exit_on_error=False)
+    
+    if ret == 0:
+        print(" Gateway is ready and programmed")
+    else:
+        print(" Gateway created (may take a moment to become ready)")
+    
+    # Show gateway status
+    print("\nGateway status:")
+    cmd("minikube kubectl -- get gateway main-gateway -n default", exit_on_error=False)
+    
+    print("\n Gateway created successfully\n")
+
+
+def setup_gateway_or_ingress(use_gateway_api: bool = True):
+    """Setup either Gateway API (Traefik) or traditional Ingress (nginx)"""
+    if use_gateway_api:
+        print("\n" + "="*80)
+        print(" Setting up Gateway API with Traefik")
+        print("="*80 + "\n")
+        install_traefik_gateway_api()
+    else:
+        print("\n" + "="*80)
+        print(" Setting up traditional Ingress (LEGACY)")
+        print("="*80 + "\n")
+        ensure_ingress_addon()
 
 def update_ingress_host(ingress_file: str, domain: str):
     """Update the host in the ingress YAML file"""
@@ -363,20 +662,35 @@ def create_dataset_service_pvcs():
     try:
         os.chdir(dataset_dir)
         
-        print("Creating directories in minikube...")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/postgres-data'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/dataset-service-data'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datasets'")
-        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/'")
+        pvcs_file = "0-pvcs.yaml"
         
-        print("Applying PVCs...")
-        cmd("minikube kubectl -- apply -f 0-pvcs.yaml -n dataset-service")
+        # Read the PVC file and replace storageClassName for minikube
+        print("Adapting PVCs for minikube (replacing storageClass)...")
+        with open(pvcs_file, 'r') as f:
+            content = f.read()
+        
+        # Replace any storageClassName with "standard" for minikube
+        # This handles: cephfs, rook-cephfs, or any other production storageClass
+        import re
+        content = re.sub(
+            r'storageClassName:\s*["\']?[a-zA-Z0-9-]+["\']?',
+            'storageClassName: "standard"',
+            content
+        )
+        
+        # Create edited file
+        edited_pvcs_file = "0-pvcs.edited.yaml"
+        with open(edited_pvcs_file, 'w') as f:
+            f.write(content)
+        print(f"Created {edited_pvcs_file} with storageClassName: standard")
+        
+        print("Applying PVCs with dynamic provisioning...")
+        cmd(f"minikube kubectl -- apply -f {edited_pvcs_file} -n dataset-service")
         
         print("Verifying PVCs...")
         cmd("minikube kubectl -- get pvc -n dataset-service")
         
-        print(" Dataset-service PVCs created successfully")
+        print(" Dataset-service PVCs created successfully with automatic provisioning")
         return True
         
     except Exception as e:
@@ -454,61 +768,87 @@ def install_dataset_service(auth_client_secret: str):
             print(f"   Will use placeholder and update later")
 
         # 1. Generate password and inject into POSTGRES_PASSWORD
-        update_postgres_password(db_service_file, CONFIG.postgres.db_password)
+        result_db = update_postgres_password(db_service_file, CONFIG.postgres.db_password)
+        if result_db:
+            # If result is a string, it's the edited file path
+            db_service_file = result_db if isinstance(result_db, str) else db_service_file
 
-        with open(deployment_file) as f:
-            docs = list(yaml.safe_load_all(f))
-        updated = False
-        for doc in docs:
-            if doc.get("kind") == "Deployment":
-                containers = doc["spec"]["template"]["spec"]["containers"]
-                for container in containers:
-                    for env in container.get("env", []):
-                        if env.get("name") == "DATASET_SERVICE_CONFIG":
-                            import json
-                            config_json = env["value"]
-                            config = json.loads(config_json)
-                            
-                            if "db" in config:
-                                config["db"]["password"] = CONFIG.postgres.db_password
-                            
-                            if "self" in config:
-                                for key, value in config["self"].items():
-                                    if isinstance(value, str) and value == "XXXXXXXX":
-                                        config["self"][key] = generate_random_password(16)
-                            
-                            if "auth" in config and "client" in config["auth"]:
-                                config["auth"]["client"]["client_secret"] = auth_client_secret
-                            
-                            config_str = json.dumps(config)
-                            config_str = replace_domain_in_config(config_str, CONFIG.public_domain)
-                            config = json.loads(config_str)
-                            
-                            tracer_url = CONFIG.tracer.url if hasattr(CONFIG, 'tracer') and hasattr(CONFIG.tracer, 'url') and CONFIG.tracer.url else None
-                            config = configure_tracer_service(config, tracer_url)
-                            
-                            if "auth" in config and "token_validation" in config["auth"]:
-                                config["auth"]["token_validation"]["kid"] = kid_rs256
-                                if kid_rs256.startswith("UPDATE_ME") or kid_rs256 in ["KEYCLOAK_NOT_READY", "INVALID_JWKS_RESPONSE", "DOWNLOAD_FAILED", "NO_KEYS_FOUND"]:
-                                    print(f" Updated kid in config with placeholder: {kid_rs256}")
-                                    print("   You will need to update this manually once Keycloak is running")
+        def update_dataset_service_deployment(docs):
+            """Update dataset-service deployment configuration"""
+            import json
+            updated = False
+            for doc in docs:
+                if doc.get("kind") == "Deployment":
+                    containers = doc["spec"]["template"]["spec"]["containers"]
+                    for container in containers:
+                        for env in container.get("env", []):
+                            if env.get("name") == "DATASET_SERVICE_CONFIG":
+                                config_json = env["value"]
+                                config = json.loads(config_json)
+                                
+                                if "db" in config:
+                                    config["db"]["password"] = CONFIG.postgres.db_password
+                                
+                                if "self" in config:
+                                    for key, value in config["self"].items():
+                                        if isinstance(value, str) and value == "XXXXXXXX":
+                                            config["self"][key] = generate_random_password(16)
+                                
+                                if "auth" in config and "client" in config["auth"]:
+                                    config["auth"]["client"]["client_secret"] = auth_client_secret
+                                
+                                # Update domain-dependent URLs (direct assignment with correct domain)
+                                if "auth" in config:
+                                    # Update auth.token_validation fields
+                                    if "token_validation" in config["auth"]:
+                                        config["auth"]["token_validation"]["token_issuer_public_keys_url"] = \
+                                            f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs"
+                                        config["auth"]["token_validation"]["issuer"] = \
+                                            f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
+                                    
+                                    # Update auth.client.auth_url
+                                    if "client" in config["auth"]:
+                                        config["auth"]["client"]["auth_url"] = \
+                                            f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token"
+                                    
+                                    # Update auth.admin_api.url
+                                    if "admin_api" in config["auth"]:
+                                        config["auth"]["admin_api"]["url"] = \
+                                            f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
+                                
+                                # Update self URLs
+                                if "self" in config:
+                                    config["self"]["root_url"] = f"https://{CONFIG.public_domain}/dataset-service"
+                                    config["self"]["dataset_link_format"] = \
+                                        f"https://{CONFIG.public_domain}/dataset-service/datasets/%s/details"
+                                
+                                tracer_url = CONFIG.tracer.url if hasattr(CONFIG, 'tracer') and hasattr(CONFIG.tracer, 'url') and CONFIG.tracer.url else None
+                                config = configure_tracer_service(config, tracer_url)
+                                
+                                if "auth" in config and "token_validation" in config["auth"]:
+                                    config["auth"]["token_validation"]["kid"] = kid_rs256
+                                    if kid_rs256.startswith("UPDATE_ME") or kid_rs256 in ["KEYCLOAK_NOT_READY", "INVALID_JWKS_RESPONSE", "DOWNLOAD_FAILED", "NO_KEYS_FOUND"]:
+                                        print(f" Updated kid in config with placeholder: {kid_rs256}")
+                                        print("   You will need to update this manually once Keycloak is running")
+                                    else:
+                                        print(f" Updated kid in token validation config: {kid_rs256}")
                                 else:
-                                    print(f" Updated kid in token validation config: {kid_rs256}")
-                            else:
-                                print(" Warning: Could not find auth.token_validation section in config")
-                            
-                            env["value"] = json.dumps(config, indent=2)
-                            updated = True
-        if updated:
-            with open(deployment_file, 'w') as f:
-                yaml.safe_dump_all(docs, f, sort_keys=False)
+                                    print(" Warning: Could not find auth.token_validation section in config")
+                                
+                                env["value"] = json.dumps(config, indent=2)
+                                updated = True
+            return updated
+        
+        result = update_yaml_config(deployment_file, update_dataset_service_deployment)
+        if result:
+            # If result is a string, it's the edited file path
+            deployment_file = result if isinstance(result, str) else deployment_file
             print(f"Injected password and random tokens into DATASET_SERVICE_CONFIG of {deployment_file}")
         else:
             print("Warning: Could not find DATASET_SERVICE_CONFIG to update password and tokens.")
-
+        
         # Apply resources
-        cmd("minikube kubectl -- apply -f 1-db-service.yaml -n dataset-service")
-        cmd("minikube kubectl -- apply -f 0-pvcs.yaml -n dataset-service")
+        cmd(f"minikube kubectl -- apply -f {db_service_file} -n dataset-service")
         cmd("minikube kubectl -- apply -f 0-service-account.yaml -n dataset-service")
         
         # Delete existing deployment to force recreation with new kid
@@ -523,24 +863,128 @@ def install_dataset_service(auth_client_secret: str):
         print(f" Creating new dataset-service-backend deployment with updated kid...")
         cmd(f"minikube kubectl -- apply -f {deployment_file} -n dataset-service")
         
-        print(f"\n Configuring ingress for dataset-service...")
-        update_ingress_host("3-ingress.yaml", CONFIG.public_domain)
-        cmd("minikube kubectl -- apply -f 3-ingress.yaml -n dataset-service")
-        print(f" Ingress applied for dataset-service at https://{CONFIG.public_domain}/dataset-service")
+        # Check if we should use Gateway API or traditional Ingress
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
         
-        redirect_ingress_file = "4-ingress-for-redirect-from-root-path.yaml"
-        if os.path.exists(redirect_ingress_file):
-            update_ingress_host(redirect_ingress_file, CONFIG.public_domain)
+        if use_gateway_api:
+            # NEW: Gateway API with HTTPRoute - apply from YAML files
+            print(f"\n Configuring HTTPRoute for dataset-service (Gateway API)...")
             
-            cmd("minikube kubectl -- apply -f 4-ingress-for-redirect-from-root-path.yaml -n dataset-service")
-            print(" Redirect ingress applied")
+            # Apply HTTPRoute with Middleware (all in one file)
+            httproute_file = "3-httproute.yaml"
+            update_ingress_host(httproute_file, CONFIG.public_domain)
+            cmd(f"minikube kubectl -- apply -f {httproute_file}")
+            print(f" HTTPRoute applied for dataset-service at https://{CONFIG.public_domain}/dataset-service")
+            
+            # Apply redirect HTTPRoute if needed
+            redirect_httproute_file = "4-httproute-redirect.yaml"
+            if os.path.exists(redirect_httproute_file):
+                update_ingress_host(redirect_httproute_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {redirect_httproute_file}")
+                print(" Redirect HTTPRoute applied")
+            
+        else:
+            # LEGACY: Traditional Ingress (commented but functional)
+            print(f"\n Configuring ingress for dataset-service (LEGACY)...")
+            update_ingress_host("3-ingress.yaml", CONFIG.public_domain)
+            cmd("minikube kubectl -- apply -f 3-ingress.yaml -n dataset-service")
+            print(f" Ingress applied for dataset-service at https://{CONFIG.public_domain}/dataset-service")
+            
+            redirect_ingress_file = "4-ingress-for-redirect-from-root-path.yaml"
+            if os.path.exists(redirect_ingress_file):
+                update_ingress_host(redirect_ingress_file, CONFIG.public_domain)
+                
+                cmd("minikube kubectl -- apply -f 4-ingress-for-redirect-from-root-path.yaml -n dataset-service")
+                print(" Redirect ingress applied")
         
         print(f"\n Waiting for dataset-service-backend deployment to be ready...")
         cmd("minikube kubectl -- wait --for=condition=available --timeout=180s deployment/dataset-service-backend -n dataset-service || true")
     finally:
         os.chdir(prev_dir)
 
-def install_guacamole(CONFIG):
+def install_dataset_explorer(CONFIG):
+    """Build and deploy dataset-explorer UI to be served by dataset-service"""
+    print(f"\n{'='*80}")
+    print(" Installing Dataset Explorer UI")
+    print(f"{'='*80}\n")
+    
+    dataset_explorer_dir = os.path.join(SCRIPT_DIR, "dataset-explorer")
+    
+    if not os.path.exists(dataset_explorer_dir):
+        print(f"Warning: dataset-explorer directory not found at {dataset_explorer_dir}")
+        return
+    
+    prev_dir = os.getcwd()
+    try:
+        os.chdir(dataset_explorer_dir)
+        
+        # Update config.json with correct domain
+        print("Configuring dataset-explorer with domain settings...")
+        config_file = "config-mini-node.json"
+        
+        if os.path.exists(config_file):
+            import json
+            with open(config_file, 'r') as f:
+                config_data = json.load(f)
+            
+            # Update URLs with configured domain
+            domain = CONFIG.public_domain
+            config_data['datasetServiceURL'] = f"https://{domain}/dataset-service"
+            config_data['keycloakURL'] = f"https://{domain}/auth"
+            config_data['keycloakRealm'] = "EUCAIM-NODE"
+            
+            # Write updated config
+            with open('public/config.json', 'w') as f:
+                json.dump(config_data, f, indent=2)
+            print(f" Updated config.json with domain: {domain}")
+        
+        # Build the React application using Docker
+        print("\nBuilding dataset-explorer React application with Docker...")
+        print(" This may take a few minutes...")
+        
+        # Use Docker to build without installing npm locally
+        build_result = cmd(
+            'docker run --rm -v $(pwd):/home/node/app node:24.9-slim '
+            'bash -c "cd /home/node/app && npm install && npm run build"',
+            exit_on_error=False
+        )
+        
+        if build_result != 0:
+            print("  Error: Build failed")
+            print("  Make sure Docker is installed and running")
+            return
+        
+        print(" Build completed successfully")
+        
+        # Prepare and copy files to minikube
+        print("\nCopying files to minikube...")
+        
+        # Create UI directory in dataset-service if it doesn't exist
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/ui'")
+        cmd("minikube ssh -- 'sudo chmod 777 /var/hostpath-provisioner/dataset-service/ui'")
+        
+        # Create tarball and copy
+        cmd("sudo tar -czf /tmp/dataset-explorer-build.tar.gz -C build .")
+        cmd("minikube cp /tmp/dataset-explorer-build.tar.gz minikube:/tmp/")
+        cmd("minikube ssh -- 'sudo rm -rf /var/hostpath-provisioner/dataset-service/ui/*'")
+        cmd("minikube ssh -- 'sudo tar -xzf /tmp/dataset-explorer-build.tar.gz -C /var/hostpath-provisioner/dataset-service/ui/'")
+        cmd("rm -f /tmp/dataset-explorer-build.tar.gz")
+        
+        print(" Files copied successfully")
+        
+        # Restart dataset-service pod to pick up new files
+        print("\nRestarting dataset-service to load new UI files...")
+        cmd("minikube kubectl -- delete pod -l app=dataset-service-backend -n dataset-service")
+        cmd("sleep 10")
+        cmd("minikube kubectl -- wait --for=condition=ready pod -l app=dataset-service-backend -n dataset-service --timeout=120s || true")
+        
+        print(f"\n Dataset Explorer installed successfully!")
+        print(f" Access at: https://{CONFIG.public_domain}/")
+        
+    finally:
+        os.chdir(prev_dir)
+
+def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_secrets):
     prev_dir = os.getcwd()
     try:
         guacamole = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "guacamole")
@@ -556,7 +1000,7 @@ def install_guacamole(CONFIG):
 
         data.setdefault('auth', {})
         data['auth'].update({
-            'postgresPassword': CONFIG.guacamole.postgresPassword,
+            'adminPassword': CONFIG.guacamole.adminPassword,
             'username': CONFIG.guacamole.username,
             'password': CONFIG.guacamole.password,
             'database': CONFIG.guacamole.database,
@@ -582,7 +1026,7 @@ def install_guacamole(CONFIG):
 
         dbcreation = data_pg.setdefault('dbcreation', {})
         dbcreation.update({
-            'adminLocalPassword': CONFIG.guacamole.postgresPassword
+            'adminLocalPassword': CONFIG.guacamole.adminPassword
         })
 
         oidc_cfg = data_pg.setdefault('OIDC', {})
@@ -597,17 +1041,25 @@ def install_guacamole(CONFIG):
         })
 
         # Update ingress host in guacamole-values.yaml BEFORE writing the file
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
+        
         if 'ingress' in data_pg:
-            # hosts is a list of dicts with 'host' and 'paths'
-            hosts = data_pg['ingress'].get('hosts')
-            if hosts and isinstance(hosts, list) and len(hosts) > 0:
-                hosts[0]['host'] = CONFIG.public_domain
-                print(f"Updated Guacamole ingress host to: {CONFIG.public_domain}")
+            if use_gateway_api:
+                # Disable Helm-managed Ingress when using Gateway API
+                data_pg['ingress']['enabled'] = False
+                print(" Disabled Helm-managed Ingress (will use HTTPRoute instead)")
+            else:
+                # LEGACY: Update Ingress configuration
+                # hosts is a list of dicts with 'host' and 'paths'
+                hosts = data_pg['ingress'].get('hosts')
+                if hosts and isinstance(hosts, list) and len(hosts) > 0:
+                    hosts[0]['host'] = CONFIG.public_domain
+                    print(f"Updated Guacamole ingress host to: {CONFIG.public_domain}")
 
-            # Update TLS hosts/secretName if present
-            if 'tls' in data_pg['ingress']:
-                for tls_entry in data_pg['ingress']['tls']:
-                    tls_entry['hosts'] = [CONFIG.public_domain]
+                # Update TLS hosts/secretName if present
+                if 'tls' in data_pg['ingress']:
+                    for tls_entry in data_pg['ingress']['tls']:
+                        tls_entry['hosts'] = [CONFIG.public_domain]
                     if tls_entry.get('secretName'):
                         tls_entry['secretName'] = CONFIG.public_domain
 
@@ -652,33 +1104,217 @@ def install_guacamole(CONFIG):
                 print(f"   Please check network connectivity to GitHub")
                 return
 
-        # Check if Guacamole is already installed
-        print(f"\n Checking if Guacamole is already installed...")
-        guac_check = cmd("minikube kubectl -- get deployment -n guacamole -l app.kubernetes.io/name=guacamole -o name 2>/dev/null | wc -l", exit_on_error=False)
+        # Install or upgrade Guacamole using helm upgrade --install
+        print(f"\n Installing/upgrading Guacamole...")
+        guac_install = cmd(
+            f"helm upgrade --install guacamole ./{chart_dir} \
+             --namespace guacamole -f guacamole-values.yaml",
+            exit_on_error=False
+        )
         
-        if guac_check == 0:
-            print(f" Installing Guacamole...")
-            # Install using the cloned chart with private values
-            cmd("helm uninstall guacamole --namespace guacamole || true")
-            guac_install = cmd(
-                f"helm install guacamole ./{chart_dir} \
-                 --namespace guacamole -f guacamole-values.yaml ",
-                exit_on_error=False
-            )
-            
-            if guac_install != 0:
-                print(f"  Warning: Guacamole installation failed")
-                print(f"   Checking if Guacamole is already running...")
-                existing_guac = cmd("minikube kubectl -- get pods -n guacamole -l app.kubernetes.io/name=guacamole 2>/dev/null", exit_on_error=False)
-                if existing_guac == 0:
-                    print(f" Guacamole is already running, continuing...")
-                else:
-                    print(f"  Guacamole installation failed, but continuing with installation...")
+        if guac_install != 0:
+            print(f"  Warning: Guacamole installation/upgrade failed")
+            print(f"   Checking if Guacamole is already running...")
+            existing_guac = cmd("minikube kubectl -- get pods -n guacamole -l app.kubernetes.io/name=guacamole 2>/dev/null", exit_on_error=False)
+            if existing_guac == 0:
+                print(f" Guacamole is already running, continuing...")
+            else:
+                print(f"  Guacamole not found, skipping user creation...")
+                return
         else:
-            print(f" Guacamole already installed, skipping...")
+            print(f" Guacamole installed/upgraded successfully")
+        
+        # Configure routing (HTTPRoute or Ingress)
+        if use_gateway_api:
+            # NEW: Apply HTTPRoute for Guacamole
+            print(f"\n Configuring HTTPRoute for Guacamole...")
+            httproute_file = "guacamole-httproute.yaml"
+            if os.path.exists(httproute_file):
+                update_ingress_host(httproute_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {httproute_file}")
+                print(f" HTTPRoute applied for Guacamole at https://{CONFIG.public_domain}/guacamole")
+            else:
+                print(f"  Warning: {httproute_file} not found")
+        
+        # Create guacamole-admin user in Keycloak
+        try:
+            print(f"\n Creating guacamole-admin user in Keycloak...")
+            auth_endpoint = f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token"
+            auth_client = AuthClient(auth_endpoint, 'dataset-service', login_as_service_account=True, 
+                                   client_secret=auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
+            keycloak_admin_api_endpoint = f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
+            admin_client = KeycloakAdminAPIClient(auth_client, keycloak_admin_api_endpoint)
+            
+            admin_client.createSpecialUser(
+                username="guacamole-admin", 
+                email="guacamole-admin@test.com", 
+                firstName="Guacamole",
+                lastName="Admin"
+            )
+            print(f" guacamole-admin user created successfully in Keycloak")
+        except Exception as e:
+            print(f"  Warning: Could not create guacamole-admin user: {e}")
+            print(f"   This user can be created manually via Keycloak admin UI if needed")
+        
+        # Install guacli (Guacamole CLI) if not already installed
+        print(f"\n Installing guacli (Guacamole CLI tool)...")
+        guacli_check = cmd("which guacli", exit_on_error=False)
+        if guacli_check != 0:
+            print(f"  Installing guacli via pip3...")
+            # Use --break-system-packages for modern Python environments (Debian 12+, Ubuntu 23.04+)
+            install_result = cmd("pip3 install --break-system-packages guacli", exit_on_error=False)
+            
+            # If that fails, try without the flag (for older systems)
+            if install_result != 0:
+                print(f"  Retrying without --break-system-packages flag...")
+                install_result = cmd("pip3 install guacli", exit_on_error=False)
+            
+            # Verify installation
+            if cmd("which guacli", exit_on_error=False) == 0:
+                print(f" guacli installed successfully")
+            else:
+                print(f"  Warning: guacli installation failed")
+                print(f"   The user management jobs may not work properly")
+                return
+        else:
+            print(f" guacli already installed")
+        
+        # Determine guacli path (may be in ~/.local/bin for user installations)
+        guacli_path = "guacli"
+        if cmd("which guacli", exit_on_error=False) != 0:
+            # Try common user installation path
+            home_dir = os.path.expanduser("~")
+            local_bin_path = os.path.join(home_dir, ".local", "bin", "guacli")
+            if os.path.exists(local_bin_path):
+                guacli_path = local_bin_path
+                print(f" Using guacli from: {guacli_path}")
+        
+        # Wait for Guacamole to be ready
+        print(f"\n Waiting for Guacamole to be ready...")
+        cmd("sleep 15")
+        
+        # Create admin group and eucaim-user-creator user using guacli
+        print(f" Creating Guacamole admin group and user...")
+        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"guacamole-admin\" --password \"{CONFIG.guacamole.adminPassword}\" \
+            create admin-group cloud-services-and-security-management", exit_on_error=False)
+        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"guacamole-admin\" --password \"{CONFIG.guacamole.adminPassword}\" \
+            create admin-user eucaim-user-creator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
 
     finally:
         os.chdir(prev_dir)
+
+## 
+def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_client_secrets, guacamole_user_creator_password: str):
+    """Configure the user-management-job-template.yaml with correct domains and passwords"""
+    print(f"\n{'='*80}")
+    print(" Configuring User Management Job Template")
+    print(f"{'='*80}\n")
+    
+    
+    template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", 
+                                  "on-event-jobs", "k8s-templates", "user-management-job-template.yaml")
+    
+    if not os.path.exists(template_file):
+        print(f" Warning: Template file not found: {template_file}")
+        return
+    
+    # Generate Guacamole admin password for eucaim-user-creator
+
+    print(f" Generated Guacamole admin password for eucaim-user-creator")
+    
+    # Get K8S service account token (we'll create a service account for this)
+    print(f" Creating service account for user management jobs...")
+    cmd("minikube kubectl -- create namespace dataset-service || true")
+    cmd("minikube kubectl -- create serviceaccount user-management-sa -n dataset-service || true")
+    cmd("minikube kubectl -- create clusterrolebinding user-management-sa-binding --clusterrole=cluster-admin --serviceaccount=dataset-service:user-management-sa || true")
+    
+    # Get the service account token
+    print(f" Retrieving service account token...")
+    # Create a secret for the service account token
+    secret_yaml = """apiVersion: v1
+kind: Secret
+metadata:
+  name: user-management-sa-token
+  namespace: dataset-service
+  annotations:
+    kubernetes.io/service-account.name: user-management-sa
+type: kubernetes.io/service-account-token
+"""
+    with open("/tmp/user-management-sa-secret.yaml", "w") as f:
+        f.write(secret_yaml)
+    
+    cmd("minikube kubectl -- apply -f /tmp/user-management-sa-secret.yaml")
+    time.sleep(2)  # Wait for token generation
+    
+    k8s_token = cmd_output("minikube kubectl -- get secret user-management-sa-token -n dataset-service -o jsonpath='{.data.token}' | base64 -d").strip()
+    
+    if not k8s_token:
+        print(f"  Warning: Could not get service account token, using placeholder")
+        k8s_token = "UPDATE_ME_WITH_SERVICE_ACCOUNT_TOKEN"
+    else:
+        print(f" Service account token retrieved successfully")
+    
+    # Read the template file
+    with open(template_file, 'r') as f:
+        content = f.read()
+    
+    # Replace all placeholders
+    replacements = {
+        'https://mininode.imaging.i3m.upv.es:6443': f'https://{CONFIG.public_domain}:6443',
+        'https://eucaim-node.i3m.upv.es/auth/realms/EUCAIM-NODE/protocol/openid-connect/token': 
+            f'https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token',
+        'https://eucaim-node.i3m.upv.es/auth/admin/realms/EUCAIM-NODE/': 
+            f'https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/',
+        'value: "eucaim-node.i3m.upv.es"': f'value: "{CONFIG.public_domain}"',
+    }
+    
+    for old, new in replacements.items():
+        content = content.replace(old, new)
+    
+    # Replace passwords (match exact lines to avoid partial replacements)
+    import re
+    
+# K8S_TOKEN LA SEGUNDA VEZ YA NO LO VA A REEMPLAZAR
+    content = re.sub(
+        r'(- name: K8S_TOKEN\s+value: )"XXXXXXXXXXXXXXXX"',
+        rf'\1"{k8s_token}"',
+        content
+    )
+    
+    # KEYCLOAK_CLIENT_SECRET
+    content = re.sub(
+        r'(- name: KEYCLOAK_CLIENT_SECRET\s+value: )"XXXXXXXXXXXXXXXX"',
+        rf'\1"{auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET}"',
+        content
+    )
+    
+    # GUACAMOLE_ADMIN_PASSWORD
+    content = re.sub(
+        r'(- name: GUACAMOLE_ADMIN_PASSWORD\s+value: )"XXXXXXXXXXXXXXXX"',
+        rf'\1"{guacamole_user_creator_password}"',
+        content
+    )
+    
+    # Write back the updated content
+    with open(template_file, 'w') as f:
+        f.write(content)
+    
+    print(f" User management job template updated successfully")
+    
+    # Create the required directories on the host
+    print(f"\n Creating required directories...")
+    cmd("sudo mkdir -p /home/ubuntu/minikube-data2/data/homes/users")
+    cmd("sudo mkdir -p /home/ubuntu/minikube-data2/data/homes/shared-folder")
+    cmd("sudo chmod -R 777 /home/ubuntu/minikube-data2/data/homes")
+    print(f" Directories created: /home/ubuntu/minikube-data2/data/homes/")
+    
+
+    # Save the password to a file for reference
+    password_file = os.path.join(SCRIPT_DIR, "guacamole-eucaim-user-creator-password.txt")
+    with open(password_file, 'w') as f:
+        f.write(f"Username: eucaim-user-creator\n")
+        f.write(f"Password: {guacamole_user_creator_password}\n")
+    print(f"\n Guacamole user credentials saved to: {password_file}")
 
 def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
     """Install DSWS Operator for managing dataset workspaces"""
@@ -818,9 +1454,17 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
                 print(f" Generated PostgreSQL password")
         
         # Update ingress hostname
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
+        
         if 'ingress' in data:
-            data['ingress']['hostname'] = CONFIG.public_domain
-            print(f" Updated ingress hostname to: {CONFIG.public_domain}")
+            if use_gateway_api:
+                # Disable Helm-managed Ingress when using Gateway API
+                data['ingress']['enabled'] = False
+                print(" Disabled Helm-managed Ingress (will use HTTPRoute instead)")
+            else:
+                # LEGACY: Update Ingress configuration
+                data['ingress']['hostname'] = CONFIG.public_domain
+                print(f" Updated ingress hostname to: {CONFIG.public_domain}")
         
         # Update authProxy configuration
         if 'authProxy' in data:
@@ -938,6 +1582,17 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         print(f"\n Kubeapps pod status:")
         cmd("minikube kubectl -- get pods -n kubeapps")
         
+        if use_gateway_api:
+            # NEW: Apply HTTPRoute for Kubeapps
+            print(f"\n Configuring HTTPRoute for Kubeapps...")
+            httproute_file = "kubeapps-httproute.yaml"
+            if os.path.exists(httproute_file):
+                update_ingress_host(httproute_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {httproute_file}")
+                print(f" HTTPRoute applied for Kubeapps at https://{CONFIG.public_domain}/apps")
+            else:
+                print(f"  Warning: {httproute_file} not found")
+        
         print(f"\n Kubeapps installed successfully!")
         print(f" Access at: https://{CONFIG.public_domain}/apps/")
         print(f"\n  Note: Kubeapps requires Kubernetes API server to be configured with OIDC.")
@@ -965,28 +1620,26 @@ def install_cert_manager(CONFIG):
     # Pull images with Docker and load into minikube
     images_loaded = True
     for image in images:
-        print(f"Pulling and loading {image}...")
         # Pull with docker
         pull_result = cmd(f"docker pull {image}", exit_on_error=False)
         if pull_result == 0:
             # Load into minikube
             load_result = cmd(f"minikube image load {image}", exit_on_error=False)
             if load_result != 0:
-                print(f"Failed to load {image} into minikube")
+                print(f"  Failed to load {image} into minikube")
                 images_loaded = False
                 break
         else:
-            print(f"Failed to pull {image} with Docker")
+            print(f"  Failed to pull {image} with Docker")
             images_loaded = False
             break
     
     if images_loaded:
-        print("All images loaded successfully, installing cert-manager...")
+        print("Images loaded, installing cert-manager v1.18.2...")
         # Now install cert-manager - images should be available locally in minikube
         yaml_install = cmd("minikube kubectl -- apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml", exit_on_error=False)
         
         if yaml_install == 0:
-            print("v1.18.2 installation successful, waiting for pods...")
             # Wait for pods to be ready with 100s timeout
             ret1 = cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=cert-manager -n cert-manager --timeout=100s", exit_on_error=False)
             ret2 = cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=cainjector -n cert-manager --timeout=100s", exit_on_error=False)
@@ -994,7 +1647,6 @@ def install_cert_manager(CONFIG):
             
             if ret1 == 0 and ret2 == 0 and ret3 == 0:
                 cert_manager_success = True
-                print("cert-manager v1.18.2 installed successfully!")
     
     # Method 2 (fallback): Try direct installation in case pre-loading wasn't needed
     if not cert_manager_success:
@@ -1002,23 +1654,19 @@ def install_cert_manager(CONFIG):
         yaml_install = cmd("minikube kubectl -- apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml", exit_on_error=False)
         
         if yaml_install == 0:
-            print("Direct installation successful, waiting for pods...")
             ret1 = cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=cert-manager -n cert-manager --timeout=100s", exit_on_error=False)
             ret2 = cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=cainjector -n cert-manager --timeout=100s", exit_on_error=False)
             ret3 = cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=webhook -n cert-manager --timeout=100s", exit_on_error=False)
             
             if ret1 == 0 and ret2 == 0 and ret3 == 0:
                 cert_manager_success = True
-                print("cert-manager installed successfully with direct method!")
     
     # Final verification
     if cert_manager_success:
-        print("Verifying cert-manager functionality...")
-        verify_result = cmd("minikube kubectl -- get pods -n cert-manager", exit_on_error=False)
-        if verify_result == 0:
-            create_letsencrypt_issuer(CONFIG)
-            print("cert-manager installation completed successfully and is functional")
-            return True
+        cmd("minikube kubectl -- get pods -n cert-manager", exit_on_error=False)
+        create_letsencrypt_issuer(CONFIG)
+        print(" cert-manager installation completed successfully")
+        return True
     
     # If all methods failed
     print("\n" + "="*80)
@@ -1063,7 +1711,70 @@ def create_letsencrypt_issuer(CONFIG):
     
     # Apply ClusterIssuer
     cmd(f"minikube kubectl -- apply -f {output_file}")
-    print(f"Let's Encrypt ClusterIssuer created successfully using template from {template_file}")
+    print(" Let's Encrypt ClusterIssuer created successfully")
+
+
+def install_api_gateway(CONFIG):
+    """Install the main API Gateway with TLS certificate from YAML file"""
+    print("\n" + "="*80)
+    print(" Installing API Gateway")
+    print("="*80 + "\n")
+    
+    gateway_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "API-Gateway", "main-gateway.yaml")
+    
+    if not os.path.exists(gateway_file):
+        print(f"Warning: Gateway manifest not found at {gateway_file}")
+        return False
+    
+    # Update hostname in the Gateway manifest
+    def update_gateway_hostname(docs):
+        updated = False
+        for doc in docs:
+            if doc.get("kind") == "Gateway":
+                for listener in doc["spec"].get("listeners", []):
+                    if "hostname" in listener:
+                        listener["hostname"] = CONFIG.public_domain
+                        updated = True
+            elif doc.get("kind") == "Certificate":
+                if "dnsNames" in doc["spec"]:
+                    doc["spec"]["dnsNames"] = [CONFIG.public_domain]
+                    updated = True
+        return updated
+    
+    # Update the manifest with the correct domain
+    result_gateway = update_yaml_config(gateway_file, update_gateway_hostname)
+    if result_gateway:
+        # If result is a string, it's the edited file path
+        gateway_file = result_gateway if isinstance(result_gateway, str) else gateway_file
+    print(f" Updated Gateway hostname to: {CONFIG.public_domain}")
+    
+    # Apply the Gateway manifest
+    result = cmd(f"minikube kubectl -- apply -f {gateway_file}", exit_on_error=False)
+    
+    if result == 0:
+        print(" API Gateway manifest applied successfully")
+        
+        # Wait a moment for the certificate to be requested
+        print("Waiting for certificate to be issued...")
+        cmd("sleep 5")
+        
+        # Check certificate status
+        cert_check = cmd("minikube kubectl -- get certificate mininode-tls-cert -n default -o jsonpath='{.status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null", exit_on_error=False)
+        
+        if cert_check == 0:
+            print(" Certificate issued successfully")
+        
+        # Show Gateway status
+        print("\nGateway status:")
+        cmd("minikube kubectl -- get gateway -n default", exit_on_error=False)
+        print("\nCertificate status:")
+        cmd("minikube kubectl -- get certificate -n default", exit_on_error=False)
+        
+        print(f"\n API Gateway installed successfully!")
+        return True
+    else:
+        print(f" Failed to apply Gateway manifest")
+        return False
 
 
 def create_iptables_rules_script():
@@ -1269,16 +1980,225 @@ echo "  sudo iptables -L FORWARD -n --line-numbers"
     os.chmod(script_path, 0o755)
     
     print(f"Persistent iptables rules script created at: {script_path}")
-    if os.geteuid() == 0:
+    
+    # If not running as root, execute the script with sudo to apply rules immediately
+    if os.geteuid() != 0:
+        print("\nApplying iptables rules with sudo...")
+        try:
+            result = subprocess.run(
+                ["sudo", script_path],
+                capture_output=True, text=True, check=False
+            )
+            if result.returncode == 0:
+                print("✅ iptables rules applied successfully!")
+                print(result.stdout)
+            else:
+                print("⚠️  Warning: Could not apply iptables rules automatically")
+                print(result.stderr)
+                print(f"\nPlease run manually: sudo {script_path}")
+        except Exception as e:
+            print(f"⚠️  Warning: Could not apply iptables rules: {e}")
+            print(f"Please run manually: sudo {script_path}")
+        
+        print("\nTo make rules persistent across reboots:")
+        print(f"sudo cp {script_path} /etc/network/if-pre-up.d/")
+        print("sudo chmod +x /etc/network/if-pre-up.d/mininode-iptables-rules")
+    else:
         print("Script will run automatically on network interface startup")
         print("You can also run it manually: sudo /etc/network/if-pre-up.d/mininode-iptables-rules")
         print(f"To verify rules: sudo iptables -t nat -L PREROUTING -n --line-numbers")
-    else:
-        print("To install system-wide, run as root:")
-        print(f"sudo cp {script_path} /etc/network/if-pre-up.d/")
-        print("sudo chmod +x /etc/network/if-pre-up.d/mininode-iptables-rules")
+
+def install_traefik_gateway_api():
+    """Install Traefik with Gateway API support instead of nginx-ingress"""
+    prev_dir = os.getcwd()
+    try:
+        print("Installing Traefik with Gateway API support...")
+        
+        # Check if Traefik is already installed
+        ret = cmd("helm list -n traefik | grep traefik", exit_on_error=False)
+        if ret == 0:
+            print(" Traefik already installed")
+            return
+        
+        # Change to traefik directory
+        traefik_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "traefik")
+        os.chdir(traefik_dir)
+        
+        # Create namespace
+        cmd("minikube kubectl -- create namespace traefik || true")
+        
+        # Add Traefik helm repo
+        cmd("helm repo add traefik https://traefik.github.io/charts")
+        cmd("helm repo update")
+        
+        # Install Traefik using values file
+        print("Installing Traefik via Helm...")
+        cmd(f"helm install traefik traefik/traefik -n traefik -f traefik-values.yaml --wait")
+        
+        # Wait for pods to be ready
+        print("Waiting for Traefik pods to be ready...")
+        cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n traefik --timeout=120s")
+        
+        print(" Traefik installed successfully")
+        
+        # Show GatewayClass
+        print("\nAvailable GatewayClasses:")
+        cmd("minikube kubectl -- get gatewayclass", exit_on_error=False)
+        
+    finally:
+        os.chdir(prev_dir)
 
 
+def create_main_gateway(domain: str, use_tls: bool = True):
+    """Create the main Gateway resource"""
+    print(f"Creating main Gateway for domain: {domain}...")
+    
+    gateway_yaml = f"""
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: main-gateway
+  namespace: default
+spec:
+  gatewayClassName: traefik
+  listeners:
+    - name: http
+      protocol: HTTP
+      port: 80
+      allowedRoutes:
+        namespaces:
+          from: All
+"""
+    
+    if use_tls:
+        gateway_yaml += f"""
+    - name: https
+      protocol: HTTPS
+      port: 443
+      tls:
+        mode: Terminate
+        certificateRefs:
+          - kind: Secret
+            name: {domain.replace('.', '-')}-tls
+            namespace: default
+      allowedRoutes:
+        namespaces:
+          from: All
+"""
+    
+    # Write to temp file and apply
+    gateway_file = "/tmp/main-gateway.yaml"
+    with open(gateway_file, 'w') as f:
+        f.write(gateway_yaml)
+    
+    cmd(f"minikube kubectl -- apply -f {gateway_file}")
+    
+    # Wait for gateway to be ready
+    print("Waiting for Gateway to be ready...")
+    time.sleep(5)
+    cmd("minikube kubectl -- wait --for=condition=Programmed gateway/main-gateway -n default --timeout=60s", exit_on_error=False)
+    
+    print(" Gateway created successfully")
+
+# def convert_ingress_to_httproute(ingress_file: str, domain: str):
+#     """Convert Ingress YAML to HTTPRoute YAML"""
+#     if not os.path.exists(ingress_file):
+#         print(f"  Ingress file {ingress_file} not found, skipping conversion...")
+#         return None
+    
+#     # Load the ingress
+#     with open(ingress_file, 'r') as f:
+#         ingress = yaml.safe_load(f)
+    
+#     if ingress.get("kind") != "Ingress":
+#         print(f"  File {ingress_file} is not an Ingress, skipping...")
+#         return None
+    
+#     # Extract namespace
+#     namespace = ingress["metadata"].get("namespace", "default")
+#     name = ingress["metadata"]["name"]
+#     annotations = ingress["metadata"].get("annotations", {})
+    
+#     # Start building HTTPRoute
+#     httproute = {
+#         "apiVersion": "gateway.networking.k8s.io/v1",
+#         "kind": "HTTPRoute",
+#         "metadata": {
+#             "name": f"{name}-route",
+#             "namespace": namespace,
+#             "annotations": {
+#                 "description": f"Migrated from Ingress: {name}"
+#             }
+#         },
+#         "spec": {
+#             "parentRefs": [
+#                 {
+#                     "name": "main-gateway",
+#                     "namespace": "default",
+#                     "sectionName": "https" if ingress["spec"].get("tls") else "http"
+#                 }
+#             ],
+#             "hostnames": [domain],
+#             "rules": []
+#         }
+#     }
+    
+    # # Convert each path to HTTPRoute rule
+    # for rule in ingress["spec"].get("rules", []):
+    #     for path_rule in rule.get("http", {}).get("paths", []):
+    #         path = path_rule["path"]
+    #         backend = path_rule["backend"]["service"]
+            
+    #         route_rule = {
+    #             "matches": [
+    #                 {
+    #                     "path": {
+    #                         "type": "PathPrefix",
+    #                         "value": path
+    #                     }
+    #                 }
+    #             ],
+    #             "backendRefs": [
+    #                 {
+    #                     "name": backend["name"],
+    #                     "port": backend["port"]["number"]
+    #                 }
+    #             ]
+    #         }
+            
+    #         # Handle rewrite-target annotation
+    #         rewrite_target = annotations.get("nginx.ingress.kubernetes.io/rewrite-target")
+    #         if rewrite_target:
+    #             route_rule["filters"].append({
+    #                 "type": "URLRewrite",
+    #                 "urlRewrite": {
+    #                     "path": {
+    #                         "type": "ReplacePrefixMatch",
+    #                         "replacePrefixMatch": rewrite_target
+    #                     }
+    #                 }
+    #             })
+            
+    #         # Handle CORS
+    #         enable_cors = annotations.get("nginx.ingress.kubernetes.io/enable-cors")
+    #         if enable_cors == "true":
+    #             route_rule["filters"].append({
+    #                 "type": "ResponseHeaderModifier",
+    #                 "responseHeaderModifier": {
+    #                     "add": [
+    #                         {"name": "Access-Control-Allow-Origin", "value": "*"},
+    #                         {"name": "Access-Control-Allow-Methods", "value": "GET, POST, PUT, DELETE, OPTIONS"},
+    #                         {"name": "Access-Control-Allow-Headers", "value": "Authorization, Content-Type"}
+    #                     ]
+    #                 }
+    #             })
+            
+    #         httproute["spec"]["rules"].append(route_rule)
+    
+    # return httproute
+
+
+## update dataset-service kid after Keycloak is running just in case the kid has changed
 def update_dataset_service_kid_from_keycloak(CONFIG):
     """
     Helper function to update the dataset-service kid after Keycloak is running
@@ -1358,14 +2278,25 @@ def update_dataset_service_kid_from_keycloak(CONFIG):
                             env["value"] = json.dumps(config, indent=2)
         
         if updated:
-            with open(deployment_file, 'w') as f:
-                yaml.safe_dump_all(docs, f, sort_keys=False)
+            # If file is in k8s-deploy-node directory, create edited copy
+            if 'k8s-deploy-node' in deployment_file:
+                # Create new file path with .edited.yaml suffix
+                base_path = deployment_file.rsplit('.', 1)[0]  # Remove extension
+                edited_file_path = base_path + '.edited.yaml'
+                with open(edited_file_path, 'w') as f:
+                    yaml.safe_dump_all(docs, f, sort_keys=False)
+                print(f"Created edited copy: {edited_file_path}")
+                deployment_file = edited_file_path
+            else:
+                # For non-k8s-deploy-node files, edit in place
+                with open(deployment_file, 'w') as f:
+                    yaml.safe_dump_all(docs, f, sort_keys=False)
             
             # Apply the updated deployment
             prev_dir = os.getcwd()
             try:
                 os.chdir(dataset_dir)
-                cmd("minikube kubectl -- apply -f 2-dataset-service.yaml -n dataset-service")
+                cmd(f"minikube kubectl -- apply -f {os.path.basename(deployment_file)} -n dataset-service")
                 print(" Dataset service deployment updated and applied")
                 
                 # Force restart of pods to pick up new kid value
@@ -1387,6 +2318,7 @@ def update_dataset_service_kid_from_keycloak(CONFIG):
     except Exception as e:
         print(f" Error updating kid: {e}")
         return False
+
 
 def package_workstation_charts(CONFIG):
     """Package and publish workstation Helm charts to dataset-service"""
@@ -1453,11 +2385,12 @@ def package_workstation_charts(CONFIG):
                 print(f" Charts packaged successfully")
                 
                 # Copy packaged charts to dataset-service output directory
-                # First, find where the charts were packaged
-                packaged_charts_dir = os.path.join(charts_dir, "chart-catalogue")
+                # Use absolute path since we changed directory
+                packaged_charts_dir = os.path.join(os.getcwd(), "chart-catalogue")
                 if not os.path.isdir(packaged_charts_dir):
-                    # Try alternate location
-                    packaged_charts_dir = charts_dir
+                    print(f"  Warning: chart-catalogue directory not found at {packaged_charts_dir}")
+                    print(f"  Skipping charts deployment to dataset-service")
+                    return
                 
                 # Copy to minikube dataset-service-data volume
                 print(f"\n Copying charts to dataset-service...")
@@ -1560,8 +2493,19 @@ def install(flavor):
     print(f" Configuration loaded from: {DEFAULT_CONFIG_FILE_PATH}")
     print(f" Domain: {CONFIG.public_domain}")
     
-    # Ensure ingress addon is enabled before installing services
-    ensure_ingress_addon()
+    # Check if Gateway API should be used (default: False for backward compatibility)
+    use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
+    
+    if use_gateway_api:
+        print(f" Using Gateway API with Traefik (NEW)")
+    else:
+        print(f" Using traditional Ingress (LEGACY)")
+    
+    # Setup Gateway API (Traefik) or traditional Ingress (nginx)
+    setup_gateway_or_ingress(use_gateway_api=use_gateway_api)
+    
+    # If using Gateway API, create the main gateway after cert-manager is installed
+    # (we'll do this after cert-manager installation below)
     
     # Apply pod priority classes
     apply_pod_priorities()
@@ -1576,6 +2520,32 @@ def install(flavor):
     CONFIG.cert_manager_available = cert_manager_available
     if not cert_manager_available:
         print("Note: Services will be configured for HTTP-only access")
+    
+    # Create main Gateway if using Gateway API (after cert-manager is available)
+    if use_gateway_api:
+        if cert_manager_available:
+            # Try to install from YAML file first (preferred method)
+            gateway_installed = install_api_gateway(CONFIG)
+            
+            # Fallback to programmatic creation if YAML method fails
+            if not gateway_installed:
+                print("Falling back to programmatic Gateway creation...")
+                use_tls = hasattr(CONFIG, 'letsencrypt') and CONFIG.letsencrypt.email
+                create_main_gateway(domain=CONFIG.public_domain, use_tls=use_tls)
+        else:
+            print("Warning: Gateway API requested but cert-manager not available")
+            print("  Gateway API requires cert-manager for TLS certificates")
+        
+        # Apply any pending HTTPRoutes now that CRDs are available
+        print("\n" + "="*80)
+        print(" Applying pending HTTPRoutes")
+        print("="*80 + "\n")
+        
+        # Keycloak HTTPRoute
+        keycloak_httproute = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak", "dep4_httproute.yaml")
+        if os.path.exists(keycloak_httproute):
+            print("Applying Keycloak HTTPRoute...")
+            cmd(f"minikube kubectl -- apply -f {keycloak_httproute}", exit_on_error=False)
     
     # Change to k8s-deploy-node directory
     os.chdir(os.path.join(SCRIPT_DIR, "k8s-deploy-node"))
@@ -1594,6 +2564,7 @@ def install(flavor):
     # Dataset service is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
         install_dataset_service(auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
+        install_dataset_explorer(CONFIG)
     
     # Package workstation charts and publish to dataset-service (requires dataset-service to be installed)
     if flavor in ["micro", "standard"]:
@@ -1601,7 +2572,11 @@ def install(flavor):
     
     # Guacamole is installed in micro and standard flavors
     if flavor in ["micro", "standard"]:
-        install_guacamole(CONFIG)
+        install_guacamole(CONFIG, guacamole_user_creator_password, auth_client_secrets)
+    
+    # Configure user management job template (requires guacamole to be installed)
+    if flavor in ["micro", "standard"]:
+        configure_user_management_job_template(CONFIG, auth_client_secrets, guacamole_user_creator_password)
     
     # Kubeapps is installed in micro and standard flavors
     if flavor in ["micro", "standard"]:

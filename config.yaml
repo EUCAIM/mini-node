@@ -1,26 +1,30 @@
-host_path: "/var/node/"
+host_path: "/home/ubuntu/minikube-data2/"
   # The path in the host that it is shared to the node services
 
-public_domain: "yourdomain.com"
+public_domain: "yourdomain"
   # The public domain where the node will be accessible
 
 postgres:
   db_password: "yourdbpassword"
   username: "yourusername"
   database: "yourdatabase"
-  
 
+use_gateway_api: true
+
+tracer:
+  url: ""
+  
 keycloak:
   admin_username: "admin"
     # The name of the admin user
-  admin_password: "supersecret_admin"
+  admin_password: "adminPassword"
     # The password to access the admin console of users management
-  db_password: "supersecret_db"
+  db_password: "dbPassword"
     # The password for the keycloak database user
   admin_emails: "admin@example.com,admin2@example.com"
     # Comma-separated list of admin emails to notify new user registrations
   idp_lsri:
-    enabled: false
+    enabled: "false"
     client_id: "xxxxxxxxx"
     client_secret: "xxxxxxxxx"
 
@@ -30,13 +34,17 @@ guacamole:
   username: "guacamole"
   password: "password"
   database: "guacamole"
-  postgresPassword: "xxxxxxxxx"
+  adminPassword: "xxxxxxxxx"
 
 oidc:
-  authorization_endpoint: "authorization_endpoint"
-  jwks_endpoint: "jwks_endpoint"
-  issuer: "issuer_url"
-  clientID: "oidc_client_id"
-  redirect_uri: "oidc_redirect_uri"
-  username_claim_type: "oidc_username_claim"
-  groups_claim_type: "oidc_groups_claim"
+  authorization_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/auth"
+  jwks_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs"
+  issuer: "https://[]/auth/realms/EUCAIM-NODE"
+  clientID: "guacamole"
+  redirect_uri: "https://[]/guacamole/"
+  username_claim_type: "preferred_username"
+  groups_claim_type: "groups"
+
+letsencrypt:
+  email: "admin@yourdomain"
+  use_staging: false

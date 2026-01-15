@@ -12,6 +12,9 @@ class Config:
 
         self.host_path = cfg['host_path']
         self.public_domain = cfg['public_domain']
+        
+        # Optional: Use Gateway API instead of traditional Ingress (default: False for backward compatibility)
+        self.use_gateway_api = cfg.get('use_gateway_api', False)
 
         # Subsections
         self.postgres = Config.Postgres(cfg['postgres'])
@@ -22,6 +25,10 @@ class Config:
         # Optional: Let's Encrypt configuration for TLS certificates
         if 'letsencrypt' in cfg:
             self.letsencrypt = Config.LetsEncrypt(cfg['letsencrypt'])
+            
+        # Optional: Tracer service configuration
+        if 'tracer' in cfg:
+            self.tracer = Config.Tracer(cfg['tracer'])
 
     class Postgres:
         def __init__(self, pg: dict):
@@ -46,21 +53,35 @@ class Config:
             self.admin_password = kc['admin_password']
             self.db_password = kc['db_password']
             self.admin_emails = kc['admin_emails']
-            self.idp_lsri = Config.Keycloak.Idp_lsri(kc['idp_lsri'])
+            
+            # Optional: client_secret for dataset-service authentication
+            self.client_secret = kc.get('client_secret', '')
+            
+            # IDP LSRI configuration (optional)
+            if 'idp_lsri' in kc:
+                self.idp_lsri = Config.Keycloak.Idp_lsri(kc['idp_lsri'])
+            else:
+                # Create default idp_lsri with disabled configuration
+                self.idp_lsri = Config.Keycloak.Idp_lsri({
+                    'enabled': 'false',
+                    'client_id': '',
+                    'client_secret': ''
+                })
 
         class Idp_lsri:
-            def __init__(self, kc: dict):
-                self.enabled = kc['enabled']
-                self.client_id = kc['client_id']
-                self.client_secret = kc['client_secret']
+            def __init__(self, idp: dict):
+                # All fields are optional with defaults
+                self.enabled = idp.get('enabled', 'false')
+                self.client_id = idp.get('client_id', '')
+                self.client_secret = idp.get('client_secret', '')
 
     class Guacamole:
         def __init__(self, gu: dict):
-            required = ['postgresPassword', 'username', 'password', 'database']
+            required = ['adminPassword', 'username', 'password', 'database']
             for key in required:
                 if key not in gu:
                     raise ValueError(f"Missing required guacamole config key: '{key}'")
-            self.postgresPassword = gu['postgresPassword']
+            self.adminPassword = gu['adminPassword']
             self.username = gu['username']
             self.password = gu['password']
             self.database = gu['database']
@@ -94,8 +115,12 @@ class Config:
             # Optional: use staging environment for testing
             self.use_staging = le.get('use_staging', False)
 
+    class Tracer:
+        def __init__(self, tr: dict):
+            self.url = tr.get('url', '')  # URL is optional
 
-def load_config(logger, config_file_path) -> Config | None:
+
+def load_config(logger, config_file_path):
     if not os.path.exists(config_file_path):
         logger.error(f"ERROR: Configuration file not found at {config_file_path}")
         return None

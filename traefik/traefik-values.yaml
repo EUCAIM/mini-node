@@ -1,0 +1,37 @@
+deployment:
+  replicas: 1
+
+providers:
+  kubernetesGateway:
+    enabled: true
+
+gateway:
+  enabled: true
+
+service:
+  enabled: true
+  type: LoadBalancer
+
+ingressRoute:
+  dashboard:
+    enabled: true
+
+logs:
+  general:
+    level: INFO
+  access:
+    enabled: true
+
+ports:
+  web:
+    port: 80
+    exposedPort: 80
+  websecure:
+    port: 443
+    exposedPort: 443
+    tls:
+      enabled: true
+
+metrics:
+  prometheus:
+    enabled: true
