@@ -12,6 +12,7 @@ Linux distribution
 Python 3.8+
 kubectl and minikube installed and configured with the addons: ingress
 Helm installed (helm must be available in your PATH)
+(curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash)
 GitHub SSH key configured
 
 ### Persistent Storage Setup (Recommended)
