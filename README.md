@@ -49,6 +49,6 @@ Fill in your domain, passwords, and other required values.
 
 3. Run the installer with python install.py:
 
-- micro: Installs Keycloak, Dataset Service, and Guacamole.
-- mini: Installs KubeApps, K8s Operator and Federated Search. (In progress).
-- standard: Full installation (In progress).
+- micro (unfederated node): Installs Keycloak, Dataset Service, Guacamole, KubeApps, K8s Operator and jobman.
+- mini (federated node): Installs Federated Search and Federated computation. (In progress).
+- standard: Full installation, QPInsights licence required (In progress).
