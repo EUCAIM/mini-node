@@ -282,10 +282,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     cmd("minikube kubectl -- get namespace keycloak")
     
     # Apply PVC manifests for dataset-service if present (do not replace storageClassName)
-    pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
-    if os.path.exists(pvcs_path):
-        print(f" Using {pvcs_path} for PVCs")
-        cmd(f"minikube kubectl -- apply -f {pvcs_path} -n dataset-service")
+
 
     # Always ensure Keycloak volumes (PV + namespaced PVCs) are applied when available
     # This creates the Keycloak PVs and the namespaced PVCs like `postgres-data`.
@@ -2626,3 +2623,4 @@ if __name__ == '__main__':
     install(flavor)
 
     exit(0)
+
