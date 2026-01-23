@@ -2643,7 +2643,7 @@ if __name__ == '__main__':
 
     flavor = str(args.FLAVOR).lower()
     while flavor not in FLAVORS:
-        print("Unknown flavor, please select one option:")
+        print("Unknown flavor, please select one option: ")
         n = 0
         for f in FLAVORS:
             print("%d - %s" % (n, f))
@@ -2659,4 +2659,3 @@ if __name__ == '__main__':
     install(flavor)
 
     exit(0)
-
