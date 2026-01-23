@@ -56,15 +56,15 @@ def update_yaml_config(file_path, update_func):
     updated = update_func(docs)
     
     if updated:
-        # If file is in k8s-deploy-node directory, create edited copy
+        # If file is in k8s-deploy-node directory, create private copy
         if 'k8s-deploy-node' in file_path:
-            # Create new file path with .edited.yaml suffix
+            # Create new file path with .private.yaml suffix
             base_path = file_path.rsplit('.', 1)[0]  # Remove extension
-            edited_file_path = base_path + '.edited.yaml'
-            with open(edited_file_path, 'w') as f:
+            private_file_path = base_path + '.private.yaml'
+            with open(private_file_path, 'w') as f:
                 yaml.safe_dump_all(docs, f, sort_keys=False)
-            print(f"Created edited copy: {edited_file_path}")
-            return edited_file_path
+            print(f"Created private copy: {private_file_path}")
+            return private_file_path
         else:
             # For non-k8s-deploy-node files, edit in place
             with open(file_path, 'w') as f:
@@ -103,10 +103,10 @@ def update_postgres_password(file_path, password, env_var_name="POSTGRES_PASSWOR
     
     result = update_yaml_config(file_path, update_password)
     if result:
-        # If result is a string, it's the edited file path
-        edited_path = result if isinstance(result, str) else file_path
-        print(f"Injected password into {env_var_name} in {edited_path}")
-        return edited_path
+        # If result is a string, it's the private file path
+        private_path = result if isinstance(result, str) else file_path
+        print(f"Injected password into {env_var_name} in {private_path}")
+        return private_path
     else:
         print(f"Warning: Could not find {env_var_name} to update password.")
         return False
@@ -281,8 +281,21 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     print("Verifying namespace is ready...")
     cmd("minikube kubectl -- get namespace keycloak")
     
-    cmd("minikube kubectl -- apply -f dep0_volumes.yaml -n keycloak")
-    cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
+    # Apply PVC manifests for dataset-service if present (do not replace storageClassName)
+    pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
+    if os.path.exists(pvcs_path):
+        print(f" Using {pvcs_path} for PVCs")
+        cmd(f"minikube kubectl -- apply -f {pvcs_path} -n dataset-service")
+
+    # Always ensure Keycloak volumes (PV + namespaced PVCs) are applied when available
+    # This creates the Keycloak PVs and the namespaced PVCs like `postgres-data`.
+    if os.path.exists("dep0_volumes.yaml"):
+        print(" Applying dep0_volumes.yaml for Keycloak volumes (pv + pvc)")
+        cmd("minikube kubectl -- apply -f dep0_volumes.yaml -n keycloak")
+
+    # Apply init volumes for keycloak if present
+    if os.path.exists("dep1_init_volumes.yaml"):
+        cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
 
     jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
@@ -361,6 +374,16 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
 
     realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
+
+# Auto-copy realm template if missing
+    if not os.path.exists(realm_config_file):
+        source_realm = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak", "eucaim-node-realm.json")
+        if os.path.exists(source_realm):
+            print(f"  Copying realm template from k8s-deploy-node...")
+            import shutil
+            shutil.copy(source_realm, realm_config_file)
+        else:
+            raise FileNotFoundError(f"Realm template not found: {source_realm}")
     realm_config_file_private_path = os.path.join(os.getcwd(), realm_config_file_private)
     with open(realm_config_file, "rt") as fin:
         with open(realm_config_file_private_path, "wt") as fout:
@@ -445,101 +468,51 @@ def ensure_ingress_addon():
         print(" Ingress addon already enabled")
 
 def install_traefik_gateway_api():
-    '''Install Traefik with Gateway API support (NEW - replaces nginx-ingress)'''
-    print("\n" + "="*80)
-    print(" Installing Traefik with Gateway API support")
-    print("="*80 + "\n")
-    
-    # Check if Traefik is already installed
-    ret = cmd("helm list -n traefik 2>/dev/null | grep traefik", exit_on_error=False)
-    if ret == 0:
-        print(" Traefik already installed")
-        return
-    
-    # Create namespace
-    print("Creating traefik namespace...")
-    cmd("minikube kubectl -- create namespace traefik --dry-run=client -o yaml | minikube kubectl -- apply -f -")
-    
-    # Add Traefik helm repo
-    print("Adding Traefik Helm repository...")
-    cmd("helm repo add traefik https://traefik.github.io/charts")
-    cmd("helm repo update")
-    
-    # Create Traefik values with recommended configuration
-    traefik_values = (
-        "deployment:\n"
-        "  replicas: 1\n"
-        "\n"
-        "providers:\n"
-        "  kubernetesGateway:\n"
-        "    enabled: true\n"
-        "\n"
-        "# Disable the chart's automatic Gateway creation - we create our own\n"
-        "gateway:\n"
-        "  enabled: false\n"
-        "\n"
-        "service:\n"
-        "  enabled: true\n"
-        "  type: LoadBalancer\n"
-        "\n"
-        "logs:\n"
-        "  general:\n"
-        "    level: INFO\n"
-        "  access:\n"
-        "    enabled: true\n"
-        "\n"
-        "ports:\n"
-        "  web:\n"
-        "    port: 8000\n"
-        "    exposedPort: 80\n"
-        "    protocol: TCP\n"
-        "  websecure:\n"
-        "    port: 8443\n"
-        "    exposedPort: 443\n"
-        "    protocol: TCP\n"
-        "    tls:\n"
-        "      enabled: true\n"
-        "\n"
-        "metrics:\n"
-        "  prometheus:\n"
-        "    enabled: true\n"
-        "\n"
-        "resources:\n"
-        "  requests:\n"
-        "    cpu: \"100m\"\n"
-        "    memory: \"128Mi\"\n"
-        "  limits:\n"
-        "    cpu: \"500m\"\n"
-        "    memory: \"256Mi\"\n"
-        "\n"
-        "# Important: Configure timeouts and body size limits\n"
-        "additionalArguments:\n"
-        "  - \"--entrypoints.websecure.transport.respondingTimeouts.readTimeout=300s\"\n"
-        "  - \"--entrypoints.websecure.transport.respondingTimeouts.writeTimeout=300s\"\n"
-        "  - \"--serversTransport.maxIdleConnsPerHost=100\"\n"
-    )
-    
-    # Write values to temp file
-    values_file = "/tmp/traefik-gateway-values.yaml"
-    with open(values_file, 'w') as f:
-        f.write(traefik_values)
-    
-    # Install Traefik
-    print("Installing Traefik via Helm (this may take a minute)...")
-    cmd(f"helm install traefik traefik/traefik -n traefik -f {values_file} --wait --timeout=5m")
-    
-    # Wait for pods to be ready
-    print("Waiting for Traefik pods to be ready...")
-    cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n traefik --timeout=120s")
-    
-    print("\n" + " Traefik installed successfully")
-    
-    # Show GatewayClass
-    print("\nAvailable GatewayClasses:")
-    cmd("minikube kubectl -- get gatewayclass", exit_on_error=False)
-    
-    print("\n INFO: Dashboard available at: http://localhost:9000/dashboard/")
-    print(" To access: kubectl port-forward -n traefik svc/traefik 9000:9000\n")
+    '''Install Traefik with Gateway API support (uses external traefik-values.yaml file)'''
+    prev_dir = os.getcwd()
+    try:
+        print("\n" + "="*80)
+        print(" Installing Traefik with Gateway API support")
+        print("="*80 + "\n")
+        
+        # Check if Traefik is already installed
+        ret = cmd("helm list -n traefik 2>/dev/null | grep traefik", exit_on_error=False)
+        if ret == 0:
+            print(" Traefik already installed")
+            return
+        
+        # Change to traefik directory
+        traefik_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "traefik")
+        os.chdir(traefik_dir)
+        
+        # Create namespace
+        print("Creating traefik namespace...")
+        cmd("minikube kubectl -- create namespace traefik --dry-run=client -o yaml | minikube kubectl -- apply -f -")
+        
+        # Add Traefik helm repo
+        print("Adding Traefik Helm repository...")
+        cmd("helm repo add traefik https://traefik.github.io/charts")
+        cmd("helm repo update")
+        
+        # Install Traefik using values file
+        print("Installing Traefik via Helm (this may take a minute)...")
+        cmd(f"helm install traefik traefik/traefik -n traefik -f traefik-values.yaml --timeout=5m")
+        
+        # Wait for pods to be ready
+        print("Waiting for Traefik pods to be ready...")
+        cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n traefik --timeout=120s")
+        
+        print("\n" + " Traefik installed successfully")
+        
+        # Show GatewayClass
+        print("\nAvailable GatewayClasses:")
+        cmd("minikube kubectl -- get gatewayclass", exit_on_error=False)
+        
+        print("\n INFO: Dashboard available at: http://localhost:9000/dashboard/")
+        print(" To access: kubectl port-forward -n traefik svc/traefik 9000:9000\n")
+        
+    finally:
+        os.chdir(prev_dir)
 
 def create_main_gateway(domain: str, use_tls: bool = True):
     '''Create the main Gateway resource for Gateway API'''
@@ -637,12 +610,41 @@ def update_ingress_host(ingress_file: str, domain: str):
     # Replace host with the configured domain
     # Match patterns like "host: eucaim-node.i3m.upv.es" or "host: mininode.imaging.i3m.upv.es"
     content = re.sub(r'host:\s+[a-zA-Z0-9.-]+', f'host: {domain}', content)
-    
+
     # Also replace domain in redirect URLs (for root path redirect ingress)
     # Match patterns like "https://eucaim-node.i3m.upv.es/dataset-service"
     content = re.sub(
-        r'(https?://)[a-zA-Z0-9.-]+(/[a-zA-Z0-9-]+)', 
+        r'(https?://)[a-zA-Z0-9.-]+(/[a-zA-Z0-9-_/%.]*)', 
         rf'\1{domain}\2', 
+        content
+    )
+
+    # Replace hostnames entries used by HTTPRoute resources.
+    # Handle forms:
+    #   hostnames: ["old.host"]
+    #   hostnames:
+    #     - "old.host"
+    #   hostnames:
+    #     - old.host
+    # Replace them all with the configured domain in quoted form.
+    # 1) Inline list form: hostnames: ["..."]
+    content = re.sub(
+        r'(hostnames:\s*\[\s*")([^"]+)("\s*\])',
+        rf'\1{domain}\3',
+        content
+    )
+
+    # 2) Block form with quoted hostname: hostnames:\n    - "..."
+    content = re.sub(
+        r'(hostnames:\s*\n\s*-\s*")([^"]+)(")',
+        rf'\1{domain}\3',
+        content
+    )
+
+    # 3) Block form with unquoted hostname: hostnames:\n    - old.host
+    content = re.sub(
+        r'(hostnames:\s*\n\s*-\s*)([A-Za-z0-9.-]+)',
+        rf'\1"{domain}"',
         content
     )
     
@@ -652,54 +654,21 @@ def update_ingress_host(ingress_file: str, domain: str):
     print(f" Updated {ingress_file} host to: {domain}")
 
 def create_dataset_service_pvcs():
-    '''Create PVCs for dataset-service'''
-    print("  Creating dataset-service PVCs...")
-    
-    dataset_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service")
-    if not os.path.exists(dataset_dir):
-        print(f" Dataset-service directory not found: {dataset_dir}")
-        return False
-    
-    prev_dir = os.getcwd()
-    try:
-        os.chdir(dataset_dir)
-        
-        pvcs_file = "0-pvcs.yaml"
-        
-        # Read the PVC file and replace storageClassName for minikube
-        print("Adapting PVCs for minikube (replacing storageClass)...")
-        with open(pvcs_file, 'r') as f:
-            content = f.read()
-        
-        # Replace any storageClassName with "standard" for minikube
-        # This handles: cephfs, rook-cephfs, or any other production storageClass
-        import re
-        content = re.sub(
-            r'storageClassName:\s*["\']?[a-zA-Z0-9-]+["\']?',
-            'storageClassName: "standard"',
-            content
-        )
-        
-        # Create edited file
-        edited_pvcs_file = "0-pvcs.edited.yaml"
-        with open(edited_pvcs_file, 'w') as f:
-            f.write(content)
-        print(f"Created {edited_pvcs_file} with storageClassName: standard")
-        
-        print("Applying PVCs with dynamic provisioning...")
-        cmd(f"minikube kubectl -- apply -f {edited_pvcs_file} -n dataset-service")
-        
-        print("Verifying PVCs...")
+    '''Create PVCs for dataset-service by applying the canonical 0-pvcs.yaml only.'''
+    print("  Applying dataset-service PVC manifest (0-pvcs.yaml) only...")
+
+    pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
+    # Ensure namespace exists
+    cmd("minikube kubectl -- create namespace dataset-service || true")
+
+    if os.path.exists(pvcs_path):
+        print(f" Applying PVC manifest: {pvcs_path}")
+        cmd(f"minikube kubectl -- apply -f {pvcs_path} -n dataset-service")
         cmd("minikube kubectl -- get pvc -n dataset-service")
-        
-        print(" Dataset-service PVCs created successfully with automatic provisioning")
         return True
-        
-    except Exception as e:
-        print(f" Error creating dataset-service PVCs: {e}")
+    else:
+        print(f" Warning: PVC manifest not found: {pvcs_path}")
         return False
-    finally:
-        os.chdir(prev_dir)
 
 def install_dataset_service(auth_client_secret: str):
     if CONFIG is None: 
@@ -993,10 +962,28 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
         os.chdir(guacamole)
         # Ensure namespace and PVC exist
         cmd("minikube kubectl -- create namespace guacamole || true")
+        # Adaptar el PVC de guacamole-postgresql para usar storageClassName: 'standard' siempre
+        pvc_path = os.path.join(os.getcwd(), "postgresql-pvc.yaml")
+        with open(pvc_path, 'r') as f:
+            pvc_docs = list(yaml.safe_load_all(f))
+        updated = False
+        # Eliminar cualquier PersistentVolume y adaptar el PVC a storageClassName: 'standard'
+        new_docs = []
+        for doc in pvc_docs:
+            if doc.get('kind') == 'PersistentVolumeClaim':
+                doc['spec']['storageClassName'] = 'standard'
+                new_docs.append(doc)
+                updated = True
+            # Ignorar cualquier PersistentVolume
+        if updated:
+            with open(pvc_path, 'w') as f:
+                yaml.safe_dump_all(new_docs, f, sort_keys=False)
+            print("Adapted postgresql-pvc.yaml for Guacamole: solo PVC y storageClassName: standard")
         cmd("minikube kubectl -- apply -f postgresql-pvc.yaml -n guacamole")
 
-        # 1. Update PostgreSQL values
+        # 1. Update PostgreSQL values (write both public and private values)
         values_file = "postgresql-values.yaml"
+        private_values_file = "postgresql-values.private.yaml"
         with open(values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
 
@@ -1007,7 +994,15 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
             'password': CONFIG.guacamole.password,
             'database': CONFIG.guacamole.database,
         })
+
+        # Note: image tag/repository are managed directly in the values files
+
+        # Do not modify image fields here; image configuration stays in the values files
+
+        # Write both public and private values files so the installer can use the private one
         with open(values_file, 'w') as f:
+            yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
+        with open(private_values_file, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
 
         # 2. Update Guacamole values (Postgres + OIDC)
@@ -1068,7 +1063,12 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
         with open(guaca_file, 'w') as f:
             yaml.dump(data_pg, f, default_flow_style=False, sort_keys=False, indent=2)
 
-        private_post_values = "postgresql-values.yaml"
+        # Write a private guacamole values file without altering image fields
+        guaca_private_file = "guacamole-values.private.yaml"
+        with open(guaca_private_file, 'w') as f:
+            yaml.dump(data_pg, f, default_flow_style=False, sort_keys=False, indent=2)
+
+        private_post_values = "postgresql-values.private.yaml"
         
         print(f"\n Checking if PostgreSQL for Guacamole is already installed...")
         pg_check = cmd("minikube kubectl -- get deployment -n guacamole -l app.kubernetes.io/name=postgresql -o name 2>/dev/null | wc -l", exit_on_error=False)
@@ -1306,10 +1306,10 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     
     # Create the required directories on the host
     print(f"\n Creating required directories...")
-    cmd("sudo mkdir -p /home/ubuntu/minikube-data2/data/homes/users")
-    cmd("sudo mkdir -p /home/ubuntu/minikube-data2/data/homes/shared-folder")
-    cmd("sudo chmod -R 777 /home/ubuntu/minikube-data2/data/homes")
-    print(f" Directories created: /home/ubuntu/minikube-data2/data/homes/")
+    cmd("sudo mkdir -p /home/ubuntu/minikube-data/data/homes/users")
+    cmd("sudo mkdir -p /home/ubuntu/minikube-data/data/homes/shared-folder")
+    cmd("sudo chmod -R 777 /home/ubuntu/minikube-data/data/homes")
+    print(f" Directories created: /home/ubuntu/minikube-data/data/homes/")
     
 
     # Save the password to a file for reference
@@ -1448,6 +1448,10 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         values_file = "values.yaml"
         with open(values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
+
+        # Create a private copy of values to avoid editing the original file
+        base_path = values_file.rsplit('.', 1)[0]
+        private_values_file = base_path + '.private.yaml'
         
         # Update PostgreSQL password if it's a placeholder
         if 'postgresql' in data and 'auth' in data['postgresql']:
@@ -1542,7 +1546,8 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
             print(f" Added eucaim-node-apps repository with URL: {CONFIG.public_domain}")
         
         # Write updated values
-        with open(values_file, 'w') as f:
+        # Write updates to a private values file so the original remains unchanged
+        with open(private_values_file, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
         
         print(f"\n Deploying Kubeapps with Helm...")
@@ -1551,10 +1556,8 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         # Use helm upgrade --install to install or update Kubeapps
         # --install: Install if not already installed
         # This ensures that any changes in values.yaml are always applied
-        cmd(
-            f"helm upgrade --install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps \
-             --version 17.1.1 --namespace kubeapps -f {values_file}"
-        )
+        cmd("helm upgrade --install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps "
+            "--version 17.1.1 --namespace kubeapps -f {}".format(private_values_file))
         
         print(f"\n Forcing Kubeapps frontend pod recreation to apply new secrets...")
         # Delete the main Kubeapps pod to force recreation with new clientSecret
@@ -2012,47 +2015,6 @@ def create_iptables_rules_script():
         print("You can also run it manually: sudo /etc/network/if-pre-up.d/mininode-iptables-rules")
         print(f"To verify rules: sudo iptables -t nat -L PREROUTING -n --line-numbers")
 
-def install_traefik_gateway_api():
-    '''Install Traefik with Gateway API support instead of nginx-ingress'''
-    prev_dir = os.getcwd()
-    try:
-        print("Installing Traefik with Gateway API support...")
-        
-        # Check if Traefik is already installed
-        ret = cmd("helm list -n traefik | grep traefik", exit_on_error=False)
-        if ret == 0:
-            print(" Traefik already installed")
-            return
-        
-        # Change to traefik directory
-        traefik_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "traefik")
-        os.chdir(traefik_dir)
-        
-        # Create namespace
-        cmd("minikube kubectl -- create namespace traefik || true")
-        
-        # Add Traefik helm repo
-        cmd("helm repo add traefik https://traefik.github.io/charts")
-        cmd("helm repo update")
-        
-        # Install Traefik using values file
-        print("Installing Traefik via Helm...")
-        cmd(f"helm install traefik traefik/traefik -n traefik -f traefik-values.yaml --wait")
-        
-        # Wait for pods to be ready
-        print("Waiting for Traefik pods to be ready...")
-        cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=traefik -n traefik --timeout=120s")
-        
-        print(" Traefik installed successfully")
-        
-        # Show GatewayClass
-        print("\nAvailable GatewayClasses:")
-        cmd("minikube kubectl -- get gatewayclass", exit_on_error=False)
-        
-    finally:
-        os.chdir(prev_dir)
-
-
 def create_main_gateway(domain: str, use_tls: bool = True):
     '''Create the main Gateway resource'''
     print(f"Creating main Gateway for domain: {domain}...")
@@ -2284,15 +2246,15 @@ def update_dataset_service_kid_from_keycloak(CONFIG):
                             env["value"] = json.dumps(config, indent=2)
         
         if updated:
-            # If file is in k8s-deploy-node directory, create edited copy
+            # If file is in k8s-deploy-node directory, create private copy
             if 'k8s-deploy-node' in deployment_file:
-                # Create new file path with .edited.yaml suffix
+                # Create new file path with .private.yaml suffix
                 base_path = deployment_file.rsplit('.', 1)[0]  # Remove extension
-                edited_file_path = base_path + '.edited.yaml'
-                with open(edited_file_path, 'w') as f:
+                private_file_path = base_path + '.private.yaml'
+                with open(private_file_path, 'w') as f:
                     yaml.safe_dump_all(docs, f, sort_keys=False)
-                print(f"Created edited copy: {edited_file_path}")
-                deployment_file = edited_file_path
+                print(f"Created private copy: {private_file_path}")
+                deployment_file = private_file_path
             else:
                 # For non-k8s-deploy-node files, edit in place
                 with open(deployment_file, 'w') as f:
@@ -2405,6 +2367,11 @@ def package_workstation_charts(CONFIG):
                 cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files/charts'")
                 cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files'")
                 
+                # Also create the directory on the host for helm repo index command
+                host_charts_dir = "/home/ubuntu/minikube-data/dataset-service/dataset-service-data/output-files/charts"
+                cmd(f"sudo mkdir -p {host_charts_dir}")
+                cmd(f"sudo chmod -R 777 /home/ubuntu/minikube-data/dataset-service/dataset-service-data/output-files")
+                
                 # Copy entire packaged directory contents to minikube using tar
                 print(f"  Copying all files from {packaged_charts_dir}...")
                 
@@ -2419,7 +2386,6 @@ def package_workstation_charts(CONFIG):
                 
                 # Generate Helm repository index.yaml locally (helm not available inside minikube)
                 print(f"\n Generating Helm repository index...")
-                host_charts_dir = "/home/ubuntu/minikube-data2/dataset-service/dataset-service-data/output-files/charts"
                 cmd(f"helm repo index {host_charts_dir} --url http://{CONFIG.public_domain}/dataset-service/output-files/charts/")
                 
                 # Clean up temporary files
@@ -2495,6 +2461,7 @@ def install(flavor):
         print("ERROR: CONFIG is None. Please ensure load_config() was called successfully.")
         exit(1)
     
+
     # Add flavor to CONFIG for use in installation functions
     CONFIG.flavor = flavor
     
@@ -2659,4 +2626,3 @@ if __name__ == '__main__':
     install(flavor)
 
     exit(0)
-
