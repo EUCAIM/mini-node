@@ -287,8 +287,72 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     # Always ensure Keycloak volumes (PV + namespaced PVCs) are applied when available
     # This creates the Keycloak PVs and the namespaced PVCs like `postgres-data`.
     if os.path.exists("dep0_volumes.yaml"):
-        print(" Applying dep0_volumes.yaml for Keycloak volumes (pv + pvc)")
-        cmd("minikube kubectl -- apply -f dep0_volumes.yaml -n keycloak")
+        print(" Applying dep0_volumes.yaml for Keycloak volumes (pv + pvc) — creating a private file with storageClassName='standard' and applying it")
+        # Read file and extract only PersistentVolumeClaim documents
+        try:
+            with open('dep0_volumes.yaml', 'r') as f:
+                docs = list(yaml.safe_load_all(f))
+        except Exception as e:
+            print(f"  Warning: could not read dep0_volumes.yaml: {e}")
+            docs = []
+
+        # Keep only PVCs and normalize storageClassName to 'standard' and namespace to 'keycloak'
+        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolumeClaim']
+        if not pvc_docs:
+            print(f"  No PersistentVolumeClaim documents found in dep0_volumes.yaml; nothing to apply")
+        else:
+            for d in pvc_docs:
+                if 'spec' not in d:
+                    d['spec'] = {}
+                d['spec']['storageClassName'] = 'standard'
+                if 'metadata' not in d:
+                    d['metadata'] = {}
+                d['metadata']['namespace'] = 'keycloak'
+
+        # Save a private copy of the modified dep0_volumes.yaml
+        private_dep0 = 'dep0_volumes.private.yaml'
+        try:
+            with open(private_dep0, 'w') as pf:
+                yaml.safe_dump_all(modified_docs, pf, sort_keys=False)
+            print(f"  Created private volumes file: {private_dep0}")
+        except Exception as e:
+            print(f"  Warning: could not write private file {private_dep0}: {e}")
+
+        # Save a full private copy for audit
+        private_dep0 = os.path.join(os.getcwd(), 'dep0_volumes.private.yaml')
+        try:
+            with open(private_dep0, 'w') as pf:
+                yaml.safe_dump_all(modified_docs, pf, sort_keys=False)
+            print(f"  Created private volumes file: {private_dep0}")
+        except Exception as e:
+            print(f"  Warning: could not write private file {private_dep0}: {e}")
+
+        # Split PVs and PVCs. Use private files and apply them (no transient tmp files)
+        pv_docs = [d for d in modified_docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolume']
+        pvc_docs = [d for d in modified_docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolumeClaim']
+
+        # Apply PVs if present (cluster-scoped) using a private PV-only manifest
+        if pv_docs:
+            pv_private = os.path.join(os.getcwd(), 'dep0_volumes.pvs.private.yaml')
+            try:
+                with open(pv_private, 'w') as f:
+                    yaml.safe_dump_all(pv_docs, f, sort_keys=False)
+                print(f"  Created private PV manifest: {pv_private}")
+            except Exception as e:
+                print(f"  Warning: could not write PV private file {pv_private}: {e}")
+            cmd(f"minikube kubectl -- apply -f {pv_private}")
+
+        # For PVCs, create a private PVC-only manifest and apply into keycloak namespace (like dataset-service)
+        if pvc_docs:
+            pvc_private = os.path.join(os.getcwd(), 'dep0_volumes.pvcs.private.yaml')
+            try:
+                with open(pvc_private, 'w') as f:
+                    yaml.safe_dump_all(pvc_docs, f, sort_keys=False)
+                print(f"  Created private PVC manifest: {pvc_private}")
+            except Exception as e:
+                print(f"  Warning: could not write PVC private file {pvc_private}: {e}")
+            cmd("minikube kubectl -- create namespace keycloak || true")
+            cmd(f"minikube kubectl -- apply -f {pvc_private} -n keycloak")
 
     # Apply init volumes for keycloak if present
     if os.path.exists("dep1_init_volumes.yaml"):
@@ -657,15 +721,37 @@ def create_dataset_service_pvcs():
     pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
     # Ensure namespace exists
     cmd("minikube kubectl -- create namespace dataset-service || true")
-
-    if os.path.exists(pvcs_path):
-        print(f" Applying PVC manifest: {pvcs_path}")
-        cmd(f"minikube kubectl -- apply -f {pvcs_path} -n dataset-service")
-        cmd("minikube kubectl -- get pvc -n dataset-service")
-        return True
-    else:
+    if not os.path.exists(pvcs_path):
         print(f" Warning: PVC manifest not found: {pvcs_path}")
         return False
+
+    # Read original file but do NOT modify it. Create a private copy containing
+    # only PersistentVolumeClaim documents and apply that in the dataset-service namespace.
+    try:
+        with open(pvcs_path, 'r') as f:
+            docs = list(yaml.safe_load_all(f))
+    except Exception as e:
+        print(f" Error reading {pvcs_path}: {e}")
+        return False
+
+    pvc_docs = [d for d in docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolumeClaim']
+    if not pvc_docs:
+        print(f" No PersistentVolumeClaim documents found in {pvcs_path}; nothing to apply")
+        return True
+
+    private_path = pvcs_path.rsplit('.', 1)[0] + '.private.yaml'
+    try:
+        with open(private_path, 'w') as pf:
+            yaml.safe_dump_all(pvc_docs, pf, sort_keys=False)
+        print(f" Created private PVC manifest: {private_path}")
+    except Exception as e:
+        print(f" Error writing private PVC manifest {private_path}: {e}")
+        return False
+
+    print(f" Applying PVC manifest: {private_path} to namespace dataset-service")
+    cmd(f"minikube kubectl -- apply -f {private_path} -n dataset-service")
+    cmd("minikube kubectl -- get pvc -n dataset-service")
+    return True
 
 def install_dataset_service(auth_client_secret: str):
     if CONFIG is None: 
