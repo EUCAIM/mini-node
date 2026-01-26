@@ -18,7 +18,7 @@ from config import *
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_FILE_PATH = "config.private.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
-##WHY None?  Because CONFIG is set later after parsing args in main
+
 CONFIG = None
 
 ## Function to execute shell commands 
