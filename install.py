@@ -18,7 +18,7 @@ from config import *
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_CONFIG_FILE_PATH = "config.private.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
-##WHY None?  Because CONFIG is set later after parsing args in main
+
 CONFIG = None
 
 ## Function to execute shell commands 
@@ -295,64 +295,28 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         except Exception as e:
             print(f"  Warning: could not read dep0_volumes.yaml: {e}")
             docs = []
+        # Update storageClassName to 'standard' for all PVCs
+        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
+        for d in pvc_docs:
+            if "spec" not in d:
+                d["spec"] = {}
+            d["spec"]["storageClassName"] = "standard"
+            if "metadata" not in d:
+                d["metadata"] = {}
+            d["metadata"]["namespace"] = "keycloak"
 
-        # Keep only PVCs and normalize storageClassName to 'standard' and namespace to 'keycloak'
-        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolumeClaim']
-        if not pvc_docs:
-            print(f"  No PersistentVolumeClaim documents found in dep0_volumes.yaml; nothing to apply")
-        else:
-            for d in pvc_docs:
-                if 'spec' not in d:
-                    d['spec'] = {}
-                d['spec']['storageClassName'] = 'standard'
-                if 'metadata' not in d:
-                    d['metadata'] = {}
-                d['metadata']['namespace'] = 'keycloak'
-
-        # Save a private copy of the modified dep0_volumes.yaml
-        private_dep0 = 'dep0_volumes.private.yaml'
+        # Save the updated PVCs to dep0_volumes.private.yaml
+        private_dep0 = "dep0_volumes.private.yaml"
         try:
-            with open(private_dep0, 'w') as pf:
-                yaml.safe_dump_all(modified_docs, pf, sort_keys=False)
+            with open(private_dep0, "w") as pf:
+                yaml.safe_dump_all(pvc_docs, pf, sort_keys=False)
             print(f"  Created private volumes file: {private_dep0}")
         except Exception as e:
             print(f"  Warning: could not write private file {private_dep0}: {e}")
 
-        # Save a full private copy for audit
-        private_dep0 = os.path.join(os.getcwd(), 'dep0_volumes.private.yaml')
-        try:
-            with open(private_dep0, 'w') as pf:
-                yaml.safe_dump_all(modified_docs, pf, sort_keys=False)
-            print(f"  Created private volumes file: {private_dep0}")
-        except Exception as e:
-            print(f"  Warning: could not write private file {private_dep0}: {e}")
-
-        # Split PVs and PVCs. Use private files and apply them (no transient tmp files)
-        pv_docs = [d for d in modified_docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolume']
-        pvc_docs = [d for d in modified_docs if isinstance(d, dict) and d.get('kind') == 'PersistentVolumeClaim']
-
-        # Apply PVs if present (cluster-scoped) using a private PV-only manifest
-        if pv_docs:
-            pv_private = os.path.join(os.getcwd(), 'dep0_volumes.pvs.private.yaml')
-            try:
-                with open(pv_private, 'w') as f:
-                    yaml.safe_dump_all(pv_docs, f, sort_keys=False)
-                print(f"  Created private PV manifest: {pv_private}")
-            except Exception as e:
-                print(f"  Warning: could not write PV private file {pv_private}: {e}")
-            cmd(f"minikube kubectl -- apply -f {pv_private}")
-
-        # For PVCs, create a private PVC-only manifest and apply into keycloak namespace (like dataset-service)
-        if pvc_docs:
-            pvc_private = os.path.join(os.getcwd(), 'dep0_volumes.pvcs.private.yaml')
-            try:
-                with open(pvc_private, 'w') as f:
-                    yaml.safe_dump_all(pvc_docs, f, sort_keys=False)
-                print(f"  Created private PVC manifest: {pvc_private}")
-            except Exception as e:
-                print(f"  Warning: could not write PVC private file {pvc_private}: {e}")
-            cmd("minikube kubectl -- create namespace keycloak || true")
-            cmd(f"minikube kubectl -- apply -f {pvc_private} -n keycloak")
+        # Apply the private file
+        cmd("minikube kubectl -- create namespace keycloak || true")
+        cmd(f"minikube kubectl -- apply -f {private_dep0}")
 
     # Apply init volumes for keycloak if present
     if os.path.exists("dep1_init_volumes.yaml"):
@@ -494,13 +458,11 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         
     else:
         ingress_file = "dep4_ingress.yaml"
-        tls_ingress_file = "dep4_ingress_tls.yaml"
         
         if not getattr(CONFIG, 'cert_manager_available', False):
             print("Note: Using HTTP-only ingress (cert-manager not available)")
         
-        selected_ingress = tls_ingress_file if use_tls else ingress_file
-        update_ingress_host(selected_ingress, CONFIG.public_domain)
+        update_ingress_host(ingress_file, CONFIG.public_domain)
 
         print("Checking if ingress already exists...")
         ingress_exists = cmd(f"minikube kubectl -- get ingress proxy-keycloak -n keycloak 2>/dev/null", exit_on_error=False)
@@ -510,7 +472,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
         else:
             print("Creating new ingress...")
-            cmd(f"minikube kubectl -- apply -f {selected_ingress} -n keycloak")
+            cmd(f"minikube kubectl -- apply -f {ingress_file} -n keycloak")
             
             if use_tls:
                 print("TLS certificate will be automatically provisioned by cert-manager")
