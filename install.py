@@ -458,13 +458,11 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         
     else:
         ingress_file = "dep4_ingress.yaml"
-        tls_ingress_file = "dep4_ingress_tls.yaml"
         
         if not getattr(CONFIG, 'cert_manager_available', False):
             print("Note: Using HTTP-only ingress (cert-manager not available)")
         
-        selected_ingress = tls_ingress_file if use_tls else ingress_file
-        update_ingress_host(selected_ingress, CONFIG.public_domain)
+        update_ingress_host(ingress_file, CONFIG.public_domain)
 
         print("Checking if ingress already exists...")
         ingress_exists = cmd(f"minikube kubectl -- get ingress proxy-keycloak -n keycloak 2>/dev/null", exit_on_error=False)
@@ -474,7 +472,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
         else:
             print("Creating new ingress...")
-            cmd(f"minikube kubectl -- apply -f {selected_ingress} -n keycloak")
+            cmd(f"minikube kubectl -- apply -f {ingress_file} -n keycloak")
             
             if use_tls:
                 print("TLS certificate will be automatically provisioned by cert-manager")
