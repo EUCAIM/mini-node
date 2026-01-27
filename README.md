@@ -1,54 +1,117 @@
-# all-in-one-node
-This repository contains scripts and configuration files to automate the deployment of a mini EUCAIM node using Kubernetes and Minikube.
-It includes automated installation for Keycloak, Guacamole, and the Dataset Service, with all secrets and configuration injected from a single YAML file.
+# EUCAIM Node Installation
 
-## Contents
-install.py – Main Python script to deploy all services and inject configuration.
-config.py – Configuration loader and validation logic.
-config.yaml – Example configuration file for secrets, domains, and service parameters.
+This repository contains the installation and configuration scripts for deploying a complete EUCAIM node infrastructure on Kubernetes.
+
+## Overview
+
+The installation script (`install.py`) automates the deployment of:
+- Keycloak (authentication/authorization)
+- Dataset Service (core data management)
+- Dataset Explorer (web frontend)
+- Guacamole (remote desktop gateway)
+- Harbor (container registry)
+- Kubeapps (application management)
+- Kubernetes Dashboard
+- DSWS Operator (workspace management)
+- Traefik (ingress controller)
+- cert-manager (SSL certificate management)
 
 ## Prerequisites
-Linux distribution
-Python 3.8+
-kubectl and minikube installed and configured with the addons: ingress
-Helm installed (helm must be available in your PATH)
-(curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash)
-GitHub SSH key configured
 
-### Persistent Storage Setup (Recommended)
-By default, Minikube’s default hostPath provisioner stores PersistentVolume data inside the Minikube VM/container. When using the Docker driver, this means that the data lives inside the ephemeral Minikube container and will be lost if the cluster is deleted or recreated.
+### System Requirements
 
-To ensure data is stored on the host machine and survives Minikube restarts, configure a host directory mount at startup so that /var/hostpath-provisioner in Minikube points to a persistent directory on your host.
+- **Operating System**: Linux (Ubuntu/Debian recommended)
+- **Kubernetes**: Minikube or production Kubernetes cluster
 
-Example (Linux and macOs host):
-```
-minikube start --driver=docker --addons ingress \
-               --cpus 8  --memory 32g \
-               --mount --mount-string="/home/ubuntu/minikube-data:/var/hostpath-provisioner"
-```
+### Required Software
 
-Example (Windows host):
+The following tools must be installed before running the installation:
 
-**Important:** For the mount to work on Windows, the host path must be inside a directory that Docker Desktop has shared with the internal Linux VM. This is configured in Docker Desktop → Settings → Resources → File Sharing.
+1. **Minikube** (for development/single-node setup)
+   ```bash
+   curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
+   sudo install minikube-linux-amd64 /usr/local/bin/minikube
+   ```
 
-```
-minikube start --driver=docker --addons ingress \
-               --cpus 8  --memory 32g \
-               --mount --mount-string="C:/Users/<username>/minikube-data:/var/hostpath-provisioner"
-```
+2. **Helm** (Kubernetes package manager)
+
+   #### Ubuntu:
+   ```bash
+   curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+   ```
+
+   #### Windows:
+   1. Download the Helm binary from the [Helm Releases Page](https://github.com/helm/helm/releases).
+   2. Extract the binary and add it to your system's PATH.
+   3. Verify the installation by running:
+      ```bash
+      helm version
+      ```
 
 
-## Usage
-1. Clone this repository:
+3. **Docker** (container runtime)
+   ```bash
+   curl -fsSL https://get.docker.com -o get-docker.sh
+   sudo sh get-docker.sh
+   ```
 
-  `git clone https://github.com/EUCAIM/mini-node.git`<br/>
-  `cd mini-node`
+4. **Git** (version control)
+   ```bash
+   sudo apt-get install git
+   ```
 
-2. Edit config.yaml
-Fill in your domain, passwords, and other required values.
+5. **Python 3** with dependencies
+   ```bash
+   sudo apt-get install python3 python3-pip python3-yaml
+   ```
 
-3. Run the installer with python install.py:
 
-- micro (unfederated node): Installs Keycloak, Dataset Service, Guacamole, KubeApps, K8s Operator and jobman.
-- mini (federated node): Installs Federated Search and Federated computation. (In progress).
-- standard: Full installation, QPInsights licence required (In progress).
+
+
+
+### Required Source Code
+
+The following must exist in the installation directory:
+
+
+1. **config.private.yaml** - Main configuration file
+   - Template: `config.yaml`
+   - Contains: domain, passwords, database settings, OIDC configuration, etc.
+
+2. **eucaim-node-realm.private.json** - Keycloak realm configuration
+   - Template: `eucaim-node-realm.json`
+   - Contains: client secrets, realm settings, identity providers
+
+
+
+## Installation Steps
+
+1. **Prepare the environment**
+   ```bash
+   # Clone this repository
+   git clone <this-repo-url>
+   cd <repo-directory>
+   
+   # After cloning the mini-node repository, clone k8s-deploy-node into the same folder
+   # (REQUIRED: k8s-deploy-node must be present in the same directory as mini-node)
+   git clone git@github.com:EUCAIM/k8s-deploy-node.git
+   
+   # Ensure dataset-explorer source code is present
+   # (should be included in this repository)
+   ```
+
+2. **Create configuration files**
+   ```bash
+   # Copy and edit the configuration template
+   cp config.yaml config.private.yaml
+   nano config.private.yaml
+   
+   # Copy and edit the Keycloak realm template
+   cp eucaim-node-realm.json eucaim-node-realm.private.json
+   nano eucaim-node-realm.private.json
+   ```
+
+3. **Run the installation**
+   ```bash
+   python3 install.py --config config.private.yaml
+   ```
