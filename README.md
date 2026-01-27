@@ -1,22 +1,4 @@
-# Repository structure and required clone
 
-Before starting the installation, clone this repository. Then, clone the `k8s-deploy-node` repository (branch `mininode`) **inside** the `mini-node` folder:
-
-```bash
-git clone <this-repo-url>
-cd mini-node
-git clone --branch mininode git@github.com:EUCAIM/k8s-deploy-node.git
-```
-
-The folder structure should look like this:
-
-```
-<working-directory>/
-└── mini-node/
-   └── k8s-deploy-node/
-```
-
-Continue with the following steps for installation.
 # EUCAIM Node Installation
 
 This repository contains the installation and configuration scripts for deploying a complete EUCAIM node infrastructure on Kubernetes.
