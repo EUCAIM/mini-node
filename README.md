@@ -93,11 +93,21 @@ The following must exist in the installation directory:
    # Clone this repository
    git clone <this-repo-url>
    cd mini-node
-   # Clone k8s-deploy-node (mininode branch) inside mini-node
+   # Clone k8s-deploy-node (mininode branch) and jobman inside mini-node
    git clone --branch mininode git@github.com:EUCAIM/k8s-deploy-node.git
+   git clone git@github.com:EUCAIM/jobman.git
    # Ensure dataset-explorer source code is present
    # (should be included in this repository)
    ```
+
+The folder structure should look like this:
+
+```
+<working-directory>/
+└── mini-node/
+   ├── k8s-deploy-node/
+   └── jobman/
+```
 
 2. **Create configuration files**
    ```bash
