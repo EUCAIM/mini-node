@@ -98,8 +98,6 @@ The following must exist in the installation directory:
    # If you do not have SSH keys configured for GitHub, use HTTPS instead:
    # git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
    git clone https://github.com/EUCAIM/jobman.git
-   > **Note:**
-   > If you see a `Permission denied (publickey)` error when cloning, it means your GitHub SSH keys are not set up. Use the HTTPS URL instead of the SSH URL for public repositories, as shown above.
    ```
 
 The folder structure should look like this:
