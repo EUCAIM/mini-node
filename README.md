@@ -7,15 +7,16 @@ This repository contains the installation and configuration scripts for deployin
 
 The installation script (`install.py`) automates the deployment of:
 - Keycloak (authentication/authorization)
-- Dataset Service (core data management)
-- Dataset Explorer (web frontend)
-- Guacamole (remote desktop gateway)
+- Dataset Service 
+- Dataset Explorer 
+- Guacamole 
+- Jobman
 - Harbor (container registry)
 - Kubeapps (application management)
 - Kubernetes Dashboard
 - DSWS Operator (workspace management)
-- Traefik (ingress controller)
-- cert-manager (SSL certificate management)
+- Traefik 
+- cert-manager 
 
 ## Prerequisites
 
