@@ -113,5 +113,5 @@ The following must exist in the installation directory:
 
 3. **Run the installation**
    ```bash
-   python3 install.py --config config.private.yaml
+   python3 install.py <flavour>
    ```
