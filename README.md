@@ -97,7 +97,9 @@ The following must exist in the installation directory:
    git clone --branch mininode git@github.com:EUCAIM/k8s-deploy-node.git
    # If you do not have SSH keys configured for GitHub, use HTTPS instead:
    # git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
+   cd k8s-deploy-node
    git clone https://github.com/EUCAIM/jobman.git
+   git clone https://github.com/EUCAIM/dataset-explorer.git
    ```
 
 The folder structure should look like this:
@@ -119,8 +121,11 @@ The folder structure should look like this:
    cp eucaim-node-realm.json eucaim-node-realm.private.json
    nano eucaim-node-realm.private.json
    ```
-
-3. **Run the installation**
+3. **Start minikube with your local folder mounted into the cluster**
+   ```bash
+   minikube start --mount --mount-string="/home/ubuntu/folderspecyfiedinconfig.yaml:/var/hostpath-provisioner"
+   ```
+5. **Run the installation**
    ```bash
    python3 install.py <flavour>
    ```
