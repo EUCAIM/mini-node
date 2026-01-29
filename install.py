@@ -919,17 +919,19 @@ def install_dataset_explorer(CONFIG):
     prev_dir = os.getcwd()
     try:
         os.chdir(dataset_explorer_dir)
-        # Generate public/config.json from config-mini-node.json before building
+        # Update config-mini-node.json in-place (backup to .private) so configure.js inside Docker
+        # will copy the updated config into public/config.json during the build.
         try:
             src_conf = os.path.join(os.getcwd(), 'config-mini-node.json')
-            dst_conf = os.path.join(os.getcwd(), 'public', 'config.json')
+            backup_conf = os.path.join(os.getcwd(), 'config-mini-node.private.json')
             if os.path.exists(src_conf):
                 try:
-                    import json as _json
                     with open(src_conf, 'r') as sf:
                         conf_text = sf.read()
 
-                    # Replace common hostnames with configured public domain
+                    # Replace localhost and known hostnames with configured public domain
+                    conf_text = conf_text.replace('https://localhost', f'https://{CONFIG.public_domain}')
+                    conf_text = conf_text.replace('http://localhost', f'http://{CONFIG.public_domain}')
                     conf_text = conf_text.replace('localhost', CONFIG.public_domain)
                     conf_text = conf_text.replace('mininode.imaging.i3m.upv.es', CONFIG.public_domain)
                     conf_text = conf_text.replace('eucaim-node.i3m.upv.es', CONFIG.public_domain)
@@ -938,6 +940,7 @@ def install_dataset_explorer(CONFIG):
                     pkg_path = os.path.join(os.getcwd(), 'package.json')
                     if os.path.exists(pkg_path):
                         try:
+                            import json as _json
                             with open(pkg_path, 'r') as pf:
                                 pkg = _json.load(pf)
                                 ver = pkg.get('version')
@@ -951,18 +954,23 @@ def install_dataset_explorer(CONFIG):
                         except Exception:
                             pass
 
-                    os.makedirs(os.path.dirname(dst_conf), exist_ok=True)
-                    with open(dst_conf, 'w') as df:
-                        df.write(conf_text)
-                    print(f"BUILD: Generated {dst_conf} from {src_conf} replacing hostnames with {CONFIG.public_domain}")
-                except Exception as e:
-                    print(f"BUILD: Warning: could not generate {dst_conf}: {e}")
-            else:
-                print(f"BUILD: Source config not found: {src_conf} (skipping generation)")
-        except Exception as _e:
-            print(f"BUILD: Unexpected error while preparing config.json: {_e}")
+                    # Backup original and write modified config-mini-node.json
+                    try:
+                        if not os.path.exists(backup_conf):
+                            shutil.copy(src_conf, backup_conf)
+                            print(f"BUILD: Backed up original config to {backup_conf}")
+                    except Exception as e:
+                        print(f"BUILD: Warning: could not create backup {backup_conf}: {e}")
 
-        # NOTE: Skipping automatic modification of config-mini-node.json here (user requested removal)
+                    with open(src_conf, 'w') as df:
+                        df.write(conf_text)
+                    print(f"BUILD: Updated {src_conf} replacing hostnames with {CONFIG.public_domain}")
+                except Exception as e:
+                    print(f"BUILD: Warning: could not update {src_conf}: {e}")
+            else:
+                print(f"BUILD: Source config not found: {src_conf} (skipping update)")
+        except Exception as _e:
+            print(f"BUILD: Unexpected error while preparing config-mini-node.json: {_e}")
 
         # Build the React application using Docker
         print("\nBUILD: BUILDING DATASET-EXPLORER REACT APPLICATION WITH DOCKER...")
