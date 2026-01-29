@@ -919,8 +919,51 @@ def install_dataset_explorer(CONFIG):
     prev_dir = os.getcwd()
     try:
         os.chdir(dataset_explorer_dir)
+        # Generate public/config.json from config-mini-node.json before building
+        try:
+            src_conf = os.path.join(os.getcwd(), 'config-mini-node.json')
+            dst_conf = os.path.join(os.getcwd(), 'public', 'config.json')
+            if os.path.exists(src_conf):
+                try:
+                    import json as _json
+                    with open(src_conf, 'r') as sf:
+                        conf_text = sf.read()
+
+                    # Replace common hostnames with configured public domain
+                    conf_text = conf_text.replace('localhost', CONFIG.public_domain)
+                    conf_text = conf_text.replace('mininode.imaging.i3m.upv.es', CONFIG.public_domain)
+                    conf_text = conf_text.replace('eucaim-node.i3m.upv.es', CONFIG.public_domain)
+
+                    # Try to set appVersion from package.json if present
+                    pkg_path = os.path.join(os.getcwd(), 'package.json')
+                    if os.path.exists(pkg_path):
+                        try:
+                            with open(pkg_path, 'r') as pf:
+                                pkg = _json.load(pf)
+                                ver = pkg.get('version')
+                            if ver:
+                                try:
+                                    obj = _json.loads(conf_text)
+                                    obj['appVersion'] = ver
+                                    conf_text = _json.dumps(obj, indent=2)
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+
+                    os.makedirs(os.path.dirname(dst_conf), exist_ok=True)
+                    with open(dst_conf, 'w') as df:
+                        df.write(conf_text)
+                    print(f"BUILD: Generated {dst_conf} from {src_conf} replacing hostnames with {CONFIG.public_domain}")
+                except Exception as e:
+                    print(f"BUILD: Warning: could not generate {dst_conf}: {e}")
+            else:
+                print(f"BUILD: Source config not found: {src_conf} (skipping generation)")
+        except Exception as _e:
+            print(f"BUILD: Unexpected error while preparing config.json: {_e}")
+
         # NOTE: Skipping automatic modification of config-mini-node.json here (user requested removal)
-        
+
         # Build the React application using Docker
         print("\nBUILD: BUILDING DATASET-EXPLORER REACT APPLICATION WITH DOCKER...")
         print("BUILD: THIS MAY TAKE A FEW MINUTES...")
@@ -943,9 +986,11 @@ def install_dataset_explorer(CONFIG):
         # Prepare and copy files to host-mounted path (avoid minikube cp/ssh)
         print("\nCOPY: COPYING FILES TO HOST PATH /home/ubuntu/minikube-data (HOST-MOUNTED TO /var/hostpath-provisioner)...")
 
-        # Write UI files directly to the canonical host path
-        host_ui_dir = "/home/ubuntu/minikube-data/dataset-service/dataset-service-data/ui"
-        print(f"COPY: USING HOST_UI_DIR = {host_ui_dir}")
+        # Use the exact value from CONFIG.host_path (must be present in config.private.yaml)
+        host_path = CONFIG.host_path
+        host_path = host_path.rstrip('/')
+        host_ui_dir = os.path.join(host_path, 'dataset-service', 'dataset-service-data', 'ui')
+        print(f"COPY: USING HOST_UI_DIR = {host_ui_dir} (from CONFIG.host_path)")
 
         # Ensure destination exists and is writable
         print(f"COPY: ENSURING DESTINATION EXISTS: {host_ui_dir}")
