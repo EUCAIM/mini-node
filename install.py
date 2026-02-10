@@ -1430,6 +1430,10 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
         # Create namespace
         cmd("minikube kubectl -- create namespace dsws-operator || true")
         
+        # Apply PVC for user homes
+        print(f" Applying user-homes PVC...")
+        cmd("minikube kubectl -- apply -f pvcs-for-operator.yaml")
+        
         # Clone the operator chart repository if not exists
         chart_repo_dir = "k8s-chaimeleon-operator"
         if not os.path.isdir(chart_repo_dir):
