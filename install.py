@@ -1312,6 +1312,9 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", 
                                   "on-event-jobs", "k8s-templates", "user-management-job-template.yaml")
     
+    # Create .private.yaml file path
+    private_file = template_file.replace('.yaml', '.private.yaml')
+    
     if not os.path.exists(template_file):
         print(f" Warning: Template file not found: {template_file}")
         return
@@ -1357,48 +1360,31 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     with open(template_file, 'r') as f:
         content = f.read()
     
-    # Replace all placeholders
+    # Replace all placeholders with actual values
     replacements = {
-        'https://mininode.imaging.i3m.upv.es:6443': f'https://{CONFIG.public_domain}:6443',
-        'https://eucaim-node.i3m.upv.es/auth/realms/EUCAIM-NODE/protocol/openid-connect/token': 
-            f'https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token',
-        'https://eucaim-node.i3m.upv.es/auth/admin/realms/EUCAIM-NODE/': 
-            f'https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/',
-        'value: "eucaim-node.i3m.upv.es"': f'value: "{CONFIG.public_domain}"',
+        '__KEYCLOAK_TOKEN_ENDPOINT__': f'https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token',
+        '__KEYCLOAK_ADMIN_ENDPOINT__': f'https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/',
+        '__KEYCLOAK_CLIENT__': 'dataset-service',
+        '__KEYCLOAK_CLIENT_SECRET__': auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET,
+        '__GUACAMOLE_ENDPOINT__': 'http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/',
+        '__GUACAMOLE_ADMIN_USER__': 'eucaim-user-creator',
+        '__GUACAMOLE_ADMIN_PASSWORD__': guacamole_user_creator_password,
+        '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
+        '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
+        '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',
+        '__K8S_ENDPOINT__': f'https://{CONFIG.public_domain}:6443',
+        '__K8S_TOKEN__': k8s_token,
     }
     
-    for old, new in replacements.items():
-        content = content.replace(old, new)
+    for placeholder, value in replacements.items():
+        content = content.replace(placeholder, value)
     
-    # Replace passwords (match exact lines to avoid partial replacements)
-    import re
-    
-# K8S_TOKEN LA SEGUNDA VEZ YA NO LO VA A REEMPLAZAR
-    content = re.sub(
-        r'(- name: K8S_TOKEN\s+value: )"XXXXXXXXXXXXXXXX"',
-        rf'\1"{k8s_token}"',
-        content
-    )
-    
-    # KEYCLOAK_CLIENT_SECRET
-    content = re.sub(
-        r'(- name: KEYCLOAK_CLIENT_SECRET\s+value: )"XXXXXXXXXXXXXXXX"',
-        rf'\1"{auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET}"',
-        content
-    )
-    
-    # GUACAMOLE_ADMIN_PASSWORD
-    content = re.sub(
-        r'(- name: GUACAMOLE_ADMIN_PASSWORD\s+value: )"XXXXXXXXXXXXXXXX"',
-        rf'\1"{guacamole_user_creator_password}"',
-        content
-    )
-    
-    # Write back the updated content
-    with open(template_file, 'w') as f:
+    # Write to the .private.yaml file
+    with open(private_file, 'w') as f:
         f.write(content)
     
-    print(f" User management job template updated successfully")
+    print(f" Created private configuration: {private_file}")
+    print(f" User management job template configured successfully")
     
     # Create the required directories on the host
     print(f"\n Creating required directories...")
@@ -1415,6 +1401,41 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         f.write(f"Username: eucaim-user-creator\n")
         f.write(f"Password: {guacamole_user_creator_password}\n")
     print(f"\n Guacamole user credentials saved to: {password_file}")
+
+def apply_roles_and_bindings():
+    '''Apply all RBAC roles and bindings from extra-configurations directory'''
+    print(f"\n{'='*80}")
+    print(" Applying RBAC Roles and Bindings")
+    print(f"{'='*80}\n")
+    
+    roles_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "extra-configurations", "roles-and-bindings")
+    
+    if not os.path.exists(roles_dir):
+        print(f"  Warning: Roles directory not found: {roles_dir}")
+        return
+    
+    # Get all YAML files in the directory
+    yaml_files = sorted([f for f in os.listdir(roles_dir) if f.endswith('.yaml') or f.endswith('.yml')])
+    
+    if not yaml_files:
+        print(f"  No YAML files found in {roles_dir}")
+        return
+    
+    print(f" Found {len(yaml_files)} RBAC configuration files:")
+    for yaml_file in yaml_files:
+        print(f"   - {yaml_file}")
+    
+    # Apply each YAML file
+    for yaml_file in yaml_files:
+        file_path = os.path.join(roles_dir, yaml_file)
+        print(f"\n Applying {yaml_file}...")
+        result = cmd(f"minikube kubectl -- apply -f {file_path}", exit_on_error=False)
+        if result == 0:
+            print(f"   Successfully applied {yaml_file}")
+        else:
+            print(f"   Warning: Failed to apply {yaml_file}")
+    
+    print(f"\n RBAC roles and bindings applied successfully\n")
 
 def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
     '''Install DSWS Operator for managing dataset workspaces'''
@@ -1684,7 +1705,7 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
             if use_gateway_api:
                 # Disable Helm-managed Ingress when using Gateway API
                 data['ingress']['enabled'] = False
-                print(" Disabled Helm-managed Ingress (will use HTTPRoute instead)")
+                print(f" Disabled Helm-managed Ingress (will use HTTPRoute instead)")
             else:
                 # LEGACY: Enable and configure Helm-managed Ingress
                 data['ingress']['enabled'] = True
@@ -1751,6 +1772,10 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         if 'frontend' not in data:
             data['frontend'] = {}
         
+        # Set the path prefix so frontend knows it's served from /apps
+        data['frontend']['pathPrefix'] = '/apps'
+        print(f" Configured frontend pathPrefix: /apps")
+        
         # Enable proxypass access URLs for proper path handling
         data['frontend']['proxypassAccessURLs'] = f"https://{CONFIG.public_domain}/apps"
         print(f" Configured frontend proxypassAccessURLs: https://{CONFIG.public_domain}/apps")
@@ -1816,6 +1841,13 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         # Delete existing ingress to avoid conflicts during upgrade
         print(f" Removing existing Kubeapps ingress to avoid conflicts...")
         cmd("minikube kubectl -- delete ingress kubeapps-ingress -n kubeapps --ignore-not-found=true", exit_on_error=False)
+        
+        # Delete PostgreSQL StatefulSet to avoid immutable field errors during upgrade
+        print(f" Removing existing PostgreSQL StatefulSet to allow upgrades...")
+        cmd("minikube kubectl -- delete statefulset kubeapps-postgresql -n kubeapps --ignore-not-found=true", exit_on_error=False)
+        
+        # Wait a moment for the StatefulSet to be fully deleted
+        cmd("sleep 5")
         
         # Use helm upgrade --install to install or update Kubeapps
         # --install: Install if not already installed
@@ -2840,6 +2872,91 @@ def package_workstation_charts(CONFIG):
     finally:
         os.chdir(prev_dir)
 
+def install_fed_search(CONFIG):
+    '''Install Focus and Beam-proxy for EUCAIM federated query support'''
+    if not hasattr(CONFIG, 'focus'):
+        print("\n Focus/Beam configuration not found in config.yaml, skipping installation.")
+        return
+
+    prev_dir = os.getcwd()
+    try:
+        print(f"\n{'='*80}")
+        print(" Installing Focus + Beam-proxy")
+        print(f"{'='*80}\n")
+
+        focus_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "federated-search")
+        os.chdir(focus_dir)
+
+        provider     = CONFIG.focus.provider
+        broker_url   = CONFIG.focus.beam_broker_url
+        endpoint_url = (f"http://dataset-service-backend-service.dataset-service"
+                        f".svc.cluster.local:11000/api/datasets/eucaimSearch")
+
+        # Create namespace
+        cmd("minikube kubectl -- apply -f namespace.yaml")
+
+        # --- Secret: api-keys ---
+        cmd(
+            f"minikube kubectl -- create secret generic api-keys"
+            f" --namespace federated-search"
+            f" --from-literal=FOCUS_API_KEY={CONFIG.focus.focus_api_key}"
+            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='{CONFIG.focus.dataset_service_auth_header}'"
+            f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+        )
+        print(" Secret 'api-keys' applied")
+
+        # --- Secret: beam-root-cert ---
+        root_cert_file = "/tmp/beam-root-cert.pem"
+        with open(root_cert_file, "w") as f:
+            f.write(CONFIG.focus.root_crt_pem)
+        cmd(
+            f"minikube kubectl -- create secret generic beam-root-cert"
+            f" --namespace federated-search"
+            f" --from-file=ROOT_CERT_PEM={root_cert_file}"
+            f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+        )
+        import os as _os
+        _os.remove(root_cert_file)
+        print(" Secret 'beam-root-cert' applied")
+
+        # --- Focus deployment (substitute template placeholders) ---
+        with open("focus-deployment.yaml", "r") as f:
+            focus_yaml = f.read()
+        focus_yaml = (focus_yaml
+                      .replace("{{ PROVIDER }}", provider)
+                      .replace("{{ ENDPOINT_URL }}", endpoint_url))
+        focus_private = "focus-deployment.private.yaml"
+        with open(focus_private, "w") as f:
+            f.write(focus_yaml)
+        cmd(f"minikube kubectl -- apply -f {focus_private}")
+        print(f" Focus deployment applied (provider={provider})")
+
+        # --- Beam-proxy deployment (substitute template placeholders) ---
+        with open("beam-proxy-deployment.yaml", "r") as f:
+            beam_yaml = f.read()
+        beam_yaml = (beam_yaml
+                     .replace("{{ PROVIDER }}", provider)
+                     .replace("{{ BROKER_URL }}", broker_url))
+        beam_private = "beam-proxy-deployment.private.yaml"
+        with open(beam_private, "w") as f:
+            f.write(beam_yaml)
+        cmd(f"minikube kubectl -- apply -f {beam_private}")
+        print(f" Beam-proxy deployment + service applied (broker={broker_url})")
+
+        # Wait for pods
+        cmd("minikube kubectl -- wait --for=condition=available --timeout=120s"
+            " deployment/beam-proxy-deployment -n federated-search || true")
+        cmd("minikube kubectl -- wait --for=condition=available --timeout=120s"
+            " deployment/focus-deployment -n federated-search || true")
+
+        print(f"\n Federated search installed successfully!")
+        print(f"   Beam app ID: focus.{provider}.broker.eucaim.cancerimage.eu")
+        print(f"   Broker: {broker_url}")
+
+    finally:
+        os.chdir(prev_dir)
+
+
 def install_qpi(CONFIG):
     '''
     Placeholder for installing the qpi service.
@@ -2961,6 +3078,63 @@ def apply_pod_priorities():
             print(f"  Warning: {priority_file} not found, skipping")
     
     print(f" Pod priority classes applied successfully")
+
+
+def install_orthanc(CONFIG):
+    '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
+    print(f"\n{'='*80}")
+    print(" Installing Orthanc PACS Server")
+    print(f"{'='*80}\n")
+    
+    prev_dir = os.getcwd()
+    try:
+        orthanc_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "orthanc")
+        os.chdir(orthanc_dir)
+        
+        # Orthanc now uses dataset-service namespace (no separate namespace needed)
+        print(" Using dataset-service namespace to share PVC...")
+        
+        # Create Orthanc directories in the shared datalake volume
+        print(" Creating Orthanc directories in shared datalake-data PVC...")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/db'")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
+        
+        # Apply ConfigMap
+        if os.path.exists("orthanc-cm.yaml"):
+            cmd("minikube kubectl -- apply -f orthanc-cm.yaml")
+        
+        # Apply Deployment
+        if os.path.exists("orthanc-deploy.yaml"):
+            cmd("minikube kubectl -- apply -f orthanc-deploy.yaml")
+        
+        # Handle Ingress/HTTPRoute based on configuration
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
+        
+        if use_gateway_api:
+            # Use HTTPRoute (Gateway API)
+            httproute_file = "orthanc-httproute.yaml"
+            if os.path.exists(httproute_file):
+                update_ingress_host(httproute_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {httproute_file}")
+                print(f" Applied HTTPRoute for Orthanc with domain: {CONFIG.public_domain}")
+            else:
+                print(f"  Warning: {httproute_file} not found")
+        else:
+            # LEGACY: Use traditional Ingress
+            ingress_file = "orthanc-ingress.yaml"
+            if os.path.exists(ingress_file):
+                update_ingress_host(ingress_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {ingress_file}")
+                print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
+            else:
+                print(f"  Warning: {ingress_file} not found")
+        
+        print(f" Orthanc installation completed")
+        print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
+        
+    finally:
+        os.chdir(prev_dir)
 
 
 def apply_roles_and_bindings():
@@ -3103,6 +3277,10 @@ def install(flavor):
     if flavor in ["micro", "standard"]:
         install_guacamole(CONFIG, guacamole_user_creator_password, auth_client_secrets)
     
+    # Orthanc PACS server is installed in micro and standard flavors
+    if flavor in ["micro", "standard"]:
+        install_orthanc(CONFIG)
+    
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "standard"]:
         configure_user_management_job_template(CONFIG, auth_client_secrets, guacamole_user_creator_password)
@@ -3110,10 +3288,17 @@ def install(flavor):
     # Kubeapps is installed in micro and standard flavors
     if flavor in ["micro", "standard"]:
         install_kubeapps(CONFIG, auth_client_secrets.CLIENT_KUBERNETES_SECRET)
-    
+
+    # Focus + Beam-proxy (optional, requires 'focus' section in config)
+    if flavor in ["mini", "standard"]:
+        install_fed_search(CONFIG)
+
     # DSWS Operator is installed in micro and standard flavors (requires dataset-service and guacamole)
     if flavor in ["micro", "standard"]:
         install_dsws_operator(CONFIG, auth_client_secrets)
+    
+    # Apply RBAC roles and bindings for OIDC groups
+    apply_roles_and_bindings()
     
     # QPI service (only in standard)
     if flavor == "standard":
