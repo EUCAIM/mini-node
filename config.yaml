@@ -1,4 +1,4 @@
-host_path: "/home/ubuntu/minikube-data2/"
+host_path: "/home/ubuntu/minikube-data/"
   # The path in the host that it is shared to the node services
 
 public_domain: "mininode.imaging.i3m.upv.es"
@@ -75,3 +75,4 @@ focus:
     REPLACE_WITH_PROXY_PRIVATE_KEY_PEM
     -----END PRIVATE KEY-----
     # PEM-encoded private key of this node's beam proxy certificate (not base64, raw PEM)
+
