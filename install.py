@@ -2899,22 +2899,34 @@ def install_fed_search(CONFIG):
         _os.remove(root_cert_file)
         print(" Secret 'beam-root-cert' applied")
 
-        # --- Focus deployment (substitute template placeholders) ---
-        with open("focus.yaml", "r") as f:
-            focus_yaml = f.read()
-        # Base64-encode the proxy private key for the Secret data field
+        # --- Secret: proxy private key (created via kubectl to avoid base64 issues) ---
         import base64 as _b64
         proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', None)
-        if not proxy_private_key_pem:
-            print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
-            print("  Add it to config.private.yaml to populate the beam-proxy Secret.")
-            proxy_privkey_b64 = "REPLACE_WITH_BASE64_ENCODED_PRIVATE_KEY_PEM"
+        if proxy_private_key_pem:
+            privkey_file = "/tmp/beam-privkey.pem"
+            with open(privkey_file, "w") as f:
+                f.write(proxy_private_key_pem)
+            cmd(
+                f"minikube kubectl -- create secret generic eucaim-broker-eucaim-cancerimage-eu-priv-pem"
+                f" --namespace federated-search"
+                f" --from-file=eucaim.broker.eucaim.cancerimage.eu.priv.pem={privkey_file}"
+                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+            )
+            import os as _os2; _os2.remove(privkey_file)
+            print(" Secret 'eucaim-broker-eucaim-cancerimage-eu-priv-pem' applied")
         else:
-            proxy_privkey_b64 = _b64.b64encode(proxy_private_key_pem.encode()).decode()
+            print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
+            print("  Beam-proxy will fail to start until this secret is created manually.")
+
+        # --- Focus deployment (substitute template placeholders) ---
+        # Strip Secret documents from focus.yaml (secret created separately above)
+        with open("focus.yaml", "r") as f:
+            focus_raw = f.read()
+        focus_docs = [doc for doc in focus_raw.split('\n---\n') if 'kind: Secret' not in doc]
+        focus_yaml = '\n---\n'.join(focus_docs)
         focus_yaml = (focus_yaml
                       .replace("{{ PROVIDER }}", provider)
-                      .replace("{{ ENDPOINT_URL }}", endpoint_url)
-                      .replace("your-proxy-private-pem-cert-enc-base64", proxy_privkey_b64))
+                      .replace("{{ ENDPOINT_URL }}", endpoint_url))
         focus_private = "focus.private.yaml"
         with open(focus_private, "w") as f:
             f.write(focus_yaml)
@@ -2922,8 +2934,11 @@ def install_fed_search(CONFIG):
         print(f" Focus deployment applied (provider={provider})")
 
         # --- Beam-proxy deployment (substitute template placeholders) ---
+        # Strip Secret documents (secrets created separately above via kubectl)
         with open("beam.yaml", "r") as f:
-            beam_yaml = f.read()
+            beam_raw = f.read()
+        beam_docs = [doc for doc in beam_raw.split('\n---\n') if 'kind: Secret' not in doc]
+        beam_yaml = '\n---\n'.join(beam_docs)
         beam_yaml = (beam_yaml
                      .replace("{{ PROVIDER }}", provider)
                      .replace("{{ BROKER_URL }}", broker_url))
