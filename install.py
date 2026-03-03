@@ -2869,13 +2869,11 @@ def install_fed_search(CONFIG):
 
         provider     = CONFIG.focus.provider
         broker_url   = CONFIG.focus.beam_broker_url
-        endpoint_url = (f"http://dataset-service-backend-service.dataset-service"
-                        f".svc.cluster.local:11000/api/datasets/eucaimSearch")
 
         # Create namespace
         cmd("minikube kubectl -- create namespace federated-search --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
-        # --- Secret: api-keys ---
+        # --- Secret: api-keys (used by focus deployment) ---
         cmd(
             f"minikube kubectl -- create secret generic api-keys"
             f" --namespace federated-search"
@@ -2885,22 +2883,30 @@ def install_fed_search(CONFIG):
         )
         print(" Secret 'api-keys' applied")
 
-        # --- Secret: beam-root-cert ---
-        root_cert_file = "/tmp/beam-root-cert.pem"
+        # --- Secret: spot-beam-secret (used by beam-proxy: APP_focus_KEY/BEAM_SECRET) ---
+        cmd(
+            f"minikube kubectl -- create secret generic spot-beam-secret"
+            f" --namespace federated-search"
+            f" --from-literal=BEAM_SECRET={CONFIG.focus.focus_api_key}"
+            f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+        )
+        print(" Secret 'spot-beam-secret' applied")
+
+        # --- Secret: root-crt-pem (projected volume in beam-proxy pod) ---
+        root_cert_file = "/tmp/root-crt-pem.pem"
         with open(root_cert_file, "w") as f:
             f.write(CONFIG.focus.root_crt_pem)
         cmd(
-            f"minikube kubectl -- create secret generic beam-root-cert"
+            f"minikube kubectl -- create secret generic root-crt-pem"
             f" --namespace federated-search"
-            f" --from-file=ROOT_CERT_PEM={root_cert_file}"
+            f" --from-file=root.crt.pem={root_cert_file}"
             f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
         )
         import os as _os
         _os.remove(root_cert_file)
-        print(" Secret 'beam-root-cert' applied")
+        print(" Secret 'root-crt-pem' applied")
 
-        # --- Secret: proxy private key (created via kubectl to avoid base64 issues) ---
-        import base64 as _b64
+        # --- Secret: proxy private key (projected volume in beam-proxy pod) ---
         proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', None)
         if proxy_private_key_pem:
             privkey_file = "/tmp/beam-privkey.pem"
@@ -2918,35 +2924,34 @@ def install_fed_search(CONFIG):
             print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
             print("  Beam-proxy will fail to start until this secret is created manually.")
 
-        # --- Focus deployment (substitute template placeholders) ---
-        # Strip Secret documents from focus.yaml (secret created separately above)
+        # --- Focus deployment ---
+        # Parse focus.yaml to: strip Secret docs, strip nodeSelector/priorityClassName
+        # (nodeSelector: chaimeleon.eu/target: core-services prevents scheduling on minikube)
         with open("focus.yaml", "r") as f:
             focus_raw = f.read()
-        focus_docs = [doc for doc in focus_raw.split('\n---\n') if 'kind: Secret' not in doc]
-        focus_yaml = '\n---\n'.join(focus_docs)
-        focus_yaml = (focus_yaml
-                      .replace("{{ PROVIDER }}", provider)
-                      .replace("{{ ENDPOINT_URL }}", endpoint_url))
+        focus_docs = [doc for doc in yaml.safe_load_all(focus_raw) if doc and doc.get('kind') != 'Secret']
+        for doc in focus_docs:
+            if doc.get('kind') == 'Deployment':
+                pod_spec = doc['spec']['template']['spec']
+                pod_spec.pop('nodeSelector', None)
+                pod_spec.pop('priorityClassName', None)
         focus_private = "focus.private.yaml"
         with open(focus_private, "w") as f:
-            f.write(focus_yaml)
-        cmd(f"minikube kubectl -- apply -f {focus_private}")
-        print(f" Focus deployment applied (provider={provider})")
+            yaml.dump_all(focus_docs, f, default_flow_style=False)
+        cmd(f"minikube kubectl -- apply -n federated-search -f {focus_private}")
+        print(f" Focus deployment applied")
 
-        # --- Beam-proxy deployment (substitute template placeholders) ---
-        # Strip Secret documents (secrets created separately above via kubectl)
+        # --- Beam-proxy deployment ---
+        # Strip Secret documents (created separately above) before applying
         with open("beam.yaml", "r") as f:
             beam_raw = f.read()
         beam_docs = [doc for doc in beam_raw.split('\n---\n') if 'kind: Secret' not in doc]
         beam_yaml = '\n---\n'.join(beam_docs)
-        beam_yaml = (beam_yaml
-                     .replace("{{ PROVIDER }}", provider)
-                     .replace("{{ BROKER_URL }}", broker_url))
         beam_private = "beam.private.yaml"
         with open(beam_private, "w") as f:
             f.write(beam_yaml)
-        cmd(f"minikube kubectl -- apply -f {beam_private}")
-        print(f" Beam-proxy deployment + service applied (broker={broker_url})")
+        cmd(f"minikube kubectl -- apply -n federated-search -f {beam_private}")
+        print(f" Beam-proxy deployment + service applied")
 
         # Wait for pods
         cmd("minikube kubectl -- wait --for=condition=available --timeout=120s"
@@ -3105,9 +3110,18 @@ def install_orthanc(CONFIG):
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
 
-        # Delete old deployment to clear any stale PVC references (e.g. orthanc-storage-pvc)
-        print(" Removing any stale Orthanc deployment...")
+        # Clean up OLD orthanc-ohif namespace (previous installation used separate NS + orthanc-storage-pvc)
+        print(" Removing old orthanc-ohif namespace resources...")
+        cmd("minikube kubectl -- delete deployment orthanc -n orthanc-ohif --ignore-not-found=true")
+        cmd("minikube kubectl -- delete replicaset -n orthanc-ohif -l app=orthanc --ignore-not-found=true")
+        cmd("minikube kubectl -- delete pod -n orthanc-ohif -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
+        cmd("minikube kubectl -- delete namespace orthanc-ohif --ignore-not-found=true")
+
+        # Clean up current namespace deployment to clear any stale PVC references
+        print(" Removing any stale Orthanc deployment in dataset-service...")
         cmd("minikube kubectl -- delete deployment orthanc -n dataset-service --ignore-not-found=true")
+        cmd("minikube kubectl -- delete replicaset -n dataset-service -l app=orthanc --ignore-not-found=true")
+        cmd("minikube kubectl -- delete pod -n dataset-service -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
         cmd("sleep 3")
 
         # Apply ConfigMap
