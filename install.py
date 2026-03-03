@@ -1455,18 +1455,8 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
         print(f" Applying user-homes PVC...")
         cmd("minikube kubectl -- apply -f pvcs-for-operator.yaml")
         
-        # Clone the operator chart repository if not exists
-        chart_repo_dir = "k8s-chaimeleon-operator"
-        if not os.path.isdir(chart_repo_dir):
-            print(f" Cloning DSWS Operator chart repository...")
-            # Clone with depth=1 for faster cloning, and disable interactive prompts
-            clone_result = cmd("GIT_TERMINAL_PROMPT=0 git clone --depth 1 https://github.com/chaimeleon-eu/k8s-chaimeleon-operator.git", exit_on_error=False)
-            if clone_result != 0:
-                print(f"  Warning: Clone failed")
-                print(f"   Please check network connectivity to GitHub")
-                return
-        else:
-            print(f" DSWS Operator chart repository already exists")
+        # Use only the current dsws-operator folder and installation-values.yaml
+        print(f" Using current dsws-operator directory and installation-values.yaml (no chart repo check)")
         
         # Update installation-values.yaml with configuration
         values_file = "installation-values.yaml"
@@ -1521,26 +1511,16 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
         
         print(f" Updated {values_file} with configuration")
         
-        # Check if operator is already installed
+        # Add Helm repo for chaimeleon-operator chart
+        print(f"\n Adding chaimeleon-services Helm repository...")
+        cmd("helm repo add chaimeleon-services https://harbor.chaimeleon-eu.i3m.upv.es/chartrepo/chaimeleon-services", exit_on_error=False)
+        cmd("helm repo update chaimeleon-services", exit_on_error=False)
+
+        # Install or upgrade DSWS Operator
         print(f"\n Checking if DSWS Operator is already installed...")
-        op_check = cmd("minikube kubectl -- get deployment -n dsws-operator -o name 2>/dev/null | wc -l", exit_on_error=False)
-        
-        chart_path = f"./{chart_repo_dir}/chaimeleon-operator-chart"
-        
-        if op_check == 0:
-            print(f" Installing DSWS Operator...")
-            
-            cmd(f"helm upgrade --install dsws-operator {chart_path} \
-                 --namespace dsws-operator -f {values_file}")
-            
-            print(f" DSWS Operator installed successfully")
-        else:
-            print(f" DSWS Operator already installed, upgrading...")
-            
-            cmd(f"helm upgrade --install dsws-operator {chart_path} \
-                 --namespace dsws-operator -f {values_file}")
-            
-            print(f" DSWS Operator upgraded successfully")
+        cmd(f"helm upgrade --install dsws-operator chaimeleon-services/chaimeleon-operator "
+            f"--version 1.3.1 --namespace dsws-operator -f {values_file}")
+        print(f" DSWS Operator installed/upgraded successfully")
         
     finally:
         os.chdir(prev_dir)
@@ -2893,7 +2873,7 @@ def install_fed_search(CONFIG):
                         f".svc.cluster.local:11000/api/datasets/eucaimSearch")
 
         # Create namespace
-        cmd("minikube kubectl -- apply -f namespace.yaml")
+        cmd("minikube kubectl -- create namespace federated-search --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
         # --- Secret: api-keys ---
         cmd(
@@ -2920,24 +2900,34 @@ def install_fed_search(CONFIG):
         print(" Secret 'beam-root-cert' applied")
 
         # --- Focus deployment (substitute template placeholders) ---
-        with open("focus-deployment.yaml", "r") as f:
+        with open("focus.yaml", "r") as f:
             focus_yaml = f.read()
+        # Base64-encode the proxy private key for the Secret data field
+        import base64 as _b64
+        proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', None)
+        if not proxy_private_key_pem:
+            print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
+            print("  Add it to config.private.yaml to populate the beam-proxy Secret.")
+            proxy_privkey_b64 = "REPLACE_WITH_BASE64_ENCODED_PRIVATE_KEY_PEM"
+        else:
+            proxy_privkey_b64 = _b64.b64encode(proxy_private_key_pem.encode()).decode()
         focus_yaml = (focus_yaml
                       .replace("{{ PROVIDER }}", provider)
-                      .replace("{{ ENDPOINT_URL }}", endpoint_url))
-        focus_private = "focus-deployment.private.yaml"
+                      .replace("{{ ENDPOINT_URL }}", endpoint_url)
+                      .replace("your-proxy-private-pem-cert-enc-base64", proxy_privkey_b64))
+        focus_private = "focus.private.yaml"
         with open(focus_private, "w") as f:
             f.write(focus_yaml)
         cmd(f"minikube kubectl -- apply -f {focus_private}")
         print(f" Focus deployment applied (provider={provider})")
 
         # --- Beam-proxy deployment (substitute template placeholders) ---
-        with open("beam-proxy-deployment.yaml", "r") as f:
+        with open("beam.yaml", "r") as f:
             beam_yaml = f.read()
         beam_yaml = (beam_yaml
                      .replace("{{ PROVIDER }}", provider)
                      .replace("{{ BROKER_URL }}", broker_url))
-        beam_private = "beam-proxy-deployment.private.yaml"
+        beam_private = "beam.private.yaml"
         with open(beam_private, "w") as f:
             f.write(beam_yaml)
         cmd(f"minikube kubectl -- apply -f {beam_private}")
@@ -3099,12 +3089,17 @@ def install_orthanc(CONFIG):
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/db'")
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
-        
+
+        # Delete old deployment to clear any stale PVC references (e.g. orthanc-storage-pvc)
+        print(" Removing any stale Orthanc deployment...")
+        cmd("minikube kubectl -- delete deployment orthanc -n dataset-service --ignore-not-found=true")
+        cmd("sleep 3")
+
         # Apply ConfigMap
         if os.path.exists("orthanc-cm.yaml"):
             cmd("minikube kubectl -- apply -f orthanc-cm.yaml")
         
-        # Apply Deployment
+        # Apply Deployment (uses datalake-data PVC in dataset-service namespace)
         if os.path.exists("orthanc-deploy.yaml"):
             cmd("minikube kubectl -- apply -f orthanc-deploy.yaml")
         
@@ -3135,33 +3130,6 @@ def install_orthanc(CONFIG):
         
     finally:
         os.chdir(prev_dir)
-
-
-def apply_roles_and_bindings():
-    '''Apply RBAC roles and bindings from extra-configurations'''
-    print(f"\n{'='*80}")
-    print(" Applying RBAC Roles and Bindings")
-    print(f"{'='*80}\n")
-    
-    roles_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "extra-configurations", "roles-and-bindings")
-    
-    if not os.path.exists(roles_dir):
-        print(f" Roles and bindings directory not found: {roles_dir}")
-        return
-    
-    # Get all YAML files in the directory
-    yaml_files = [f for f in os.listdir(roles_dir) if f.endswith('.yaml') or f.endswith('.yml')]
-    
-    if not yaml_files:
-        print(f" No YAML files found in {roles_dir}")
-        return
-    
-    for yaml_file in sorted(yaml_files):
-        file_path = os.path.join(roles_dir, yaml_file)
-        print(f" Applying {yaml_file}...")
-        cmd(f"minikube kubectl -- apply -f {file_path}")
-    
-    print(f" RBAC roles and bindings applied successfully")
 
 
 FLAVORS = ["micro", "mini", "standard"]
@@ -3270,31 +3238,31 @@ def install(flavor):
         install_dataset_explorer(CONFIG)
     
     # Package workstation charts and publish to dataset-service (requires dataset-service to be installed)
-    if flavor in ["micro", "standard"]:
+    if flavor in ["micro", "mini", "standard"]:
         package_workstation_charts(CONFIG)
     
-    # Guacamole is installed in micro and standard flavors
-    if flavor in ["micro", "standard"]:
+    # Guacamole is installed in micro, mini and standard flavors
+    if flavor in ["micro", "mini", "standard"]:
         install_guacamole(CONFIG, guacamole_user_creator_password, auth_client_secrets)
     
-    # Orthanc PACS server is installed in micro and standard flavors
-    if flavor in ["micro", "standard"]:
+    # Orthanc PACS server is installed in micro, mini and standard flavors
+    if flavor in ["micro", "mini", "standard"]:
         install_orthanc(CONFIG)
     
     # Configure user management job template (requires guacamole to be installed)
-    if flavor in ["micro", "standard"]:
+    if flavor in ["micro", "mini", "standard"]:
         configure_user_management_job_template(CONFIG, auth_client_secrets, guacamole_user_creator_password)
     
-    # Kubeapps is installed in micro and standard flavors
-    if flavor in ["micro", "standard"]:
+    # Kubeapps is installed in micro, mini and standard flavors
+    if flavor in ["micro", "mini", "standard"]:
         install_kubeapps(CONFIG, auth_client_secrets.CLIENT_KUBERNETES_SECRET)
 
     # Focus + Beam-proxy (optional, requires 'focus' section in config)
     if flavor in ["mini", "standard"]:
         install_fed_search(CONFIG)
 
-    # DSWS Operator is installed in micro and standard flavors (requires dataset-service and guacamole)
-    if flavor in ["micro", "standard"]:
+    # DSWS Operator is installed in micro, mini and standard flavors (requires dataset-service and guacamole)
+    if flavor in ["micro", "mini", "standard"]:
         install_dsws_operator(CONFIG, auth_client_secrets)
     
     # Apply RBAC roles and bindings for OIDC groups
@@ -3304,8 +3272,8 @@ def install(flavor):
     if flavor == "standard":
         install_qpi(CONFIG)
     
-    # Job manager service (micro and standard)
-    if flavor in ["micro", "standard"]:
+    # Job manager service (micro, mini and standard)
+    if flavor in ["micro", "mini", "standard"]:
         install_jobman_service(CONFIG, auth_client_secrets)
     
     # Post-installation tasks
@@ -3313,7 +3281,7 @@ def install(flavor):
     print(" Post-installation: Attempting to update dataset-service kid from running Keycloak...")
     print(f"{'='*80}\n")
     
-    if flavor in ["mini", "standard"]:
+    if flavor in ["micro", "mini", "standard"]:
         # Wait for Keycloak to be ready
         print("Waiting 30 seconds for Keycloak to be fully operational...")
         cmd("sleep 30")
