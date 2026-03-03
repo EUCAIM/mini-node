@@ -1,7 +1,7 @@
 host_path: "/home/ubuntu/minikube-data2/"
   # The path in the host that it is shared to the node services
 
-public_domain: "yourdomain"
+public_domain: "mininode.imaging.i3m.upv.es"
   # The public domain where the node will be accessible
 
 postgres:
@@ -17,9 +17,9 @@ tracer:
 keycloak:
   admin_username: "admin"
     # The name of the admin user
-  admin_password: "adminPassword"
+  admin_password: "supersecret_admin"
     # The password to access the admin console of users management
-  db_password: "dbPassword"
+  db_password: "supersecret_db"
     # The password for the keycloak database user
   admin_emails: "admin@example.com,admin2@example.com"
     # Comma-separated list of admin emails to notify new user registrations
@@ -27,6 +27,13 @@ keycloak:
     enabled: "false"
     client_id: "xxxxxxxxx"
     client_secret: "xxxxxxxxx"
+
+# Optional: Platform administrator user (cluster admin)
+platform_admin_user:
+  username: "platform-admin"
+  email: "platform-admin@example.com"
+  password: "supersecret_platform_admin"
+    # This user will have administrative access to the entire platform
 
 guacamole:
   hostname: "postgresql"
@@ -46,5 +53,25 @@ oidc:
   groups_claim_type: "groups"
 
 letsencrypt:
-  email: "admin@yourdomain"
+  email: "admin@i3m.upv.es"
   use_staging: false
+
+focus:
+  provider: "YOUR_PROV"
+    # Short provider identifier, e.g. 'upv' — used in beam app IDs
+  focus_api_key: "changeme"
+    # API key for the focus application (from beam broker registration)
+  dataset_service_auth_header: "Basic changeme"
+    # Authorization header value for dataset-service API calls (Base64 encoded credentials)
+  beam_broker_url: "https://broker.eucaim.cancerimage.eu"
+    # URL of the EUCAIM beam broker
+  root_crt_pem: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE_WITH_BROKER_ROOT_CA_PEM
+    -----END CERTIFICATE-----
+    # PEM-encoded root CA certificate of the beam broker (for TLS verification)
+  proxy_private_key_pem: |
+    -----BEGIN PRIVATE KEY-----
+    REPLACE_WITH_PROXY_PRIVATE_KEY_PEM
+    -----END PRIVATE KEY-----
+    # PEM-encoded private key of this node's beam proxy certificate (not base64, raw PEM)
