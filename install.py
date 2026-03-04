@@ -3003,7 +3003,7 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
         webservice_content = webservice_content.replace('<jobman_host>', CONFIG.public_domain)
 
         # Fix the Service spec: target -> targetPort (source yaml uses 'target' which is not valid K8s)
-        webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
+        # webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
 
         # Read and process settings.json template
         settings_template_file = os.path.join(os.path.expanduser("~"), "mini-node", "jobman-settings.json")
