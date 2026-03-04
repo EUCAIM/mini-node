@@ -1,0 +1,167 @@
+{
+  "jobsQueue": {
+      "namespace": "jobman-service",
+      "configmap": "jobman-queue-position",
+      "gpuResources": [
+          "nvidia.com/gpu"
+      ]
+  },
+  "job": {
+      "serviceAccount": "jobman-k8s-logger-serviceaccount",
+      "serviceAccountTokenSecret": "jobman-k8s-logger-serviceaccount-secret",
+      "kubeRootCASecret": "kube-root-ca.crt",
+      "userNameAnnotation": "chaimeleon.eu/userName",
+      "protectedNamespace": "jobman-service-exec",
+      "annotationDatasetsList": "chaimeleon.eu/datasetsIDs",
+      "annotations": [
+          {
+              "key": "chaimeleon.eu/persistentHomeMountPoint",
+              "value": "/home/chaimeleon/persistent-home",
+              "valueType": "string"
+          },
+          {
+              "key": "chaimeleon.eu/persistentSharedFolderMountPoint",
+              "value": "/home/chaimeleon/persistent-shared-folder",
+              "valueType": "string"
+          },
+          {
+              "key": "chaimeleon.eu/datasetsMountPoint",
+              "value": "/home/chaimeleon/datasets",
+              "valueType": "string"
+          }
+      ],
+      "defaultImage": {
+        "fullUrl": "harbor.chaimeleon-eu.i3m.upv.es:5000/chaimeleon-library-batch/ubuntu-python:latest",
+        "imagePullSecrets": null
+      },
+      "userConfigmap": "chaimeleon",
+      "priorityClassName":"processing-applications",
+      "securityContext": {
+        "runAsUser": 1000,
+        "runAsGroup": 1000,
+        "fsGroup": 1000,
+        "supplementalGroups": []
+      },
+      "resources": {
+        "default": "no-gpu",
+        "label": "chaimeleon.eu/jobResourcesFlavor",
+        "predefined": [
+            {
+                "name": "small-gpu",
+                "description": "",
+                "maxRunTime": 16,
+                "resources": {
+                    "requests": {
+                        "cpu": "3000m",
+                        "memory": "28G",
+                        "nvidia.com/gpu": 1
+                    },
+                    "limits": {
+                        "cpu": "6000m",
+                        "memory": "28G",
+                        "nvidia.com/gpu": 1
+                    }
+                }
+            },
+            {
+                "name": "medium-gpu",
+                "description": "",
+                "maxRunTime": 24,
+                "resources": {
+                    "requests": {
+                        "cpu": "7000m",
+                        "memory": "60G",
+                        "nvidia.com/gpu": 1
+                    },
+                    "limits": {
+                        "cpu": "8000m",
+                        "memory": "60G",
+                        "nvidia.com/gpu": 1
+                    }
+                }
+            },
+            {
+                "name": "large-gpu",
+                "description": "",
+                "maxRunTime": 24,
+                "resources": {
+                    "requests": {
+                        "cpu": "7000m",
+                        "memory": "60G",
+                        "nvidia.com/gpu": 1
+                    },
+                    "limits": {
+                        "cpu": "8000m",
+                        "memory": "60G",
+                        "nvidia.com/gpu": 1
+                    }
+                }
+            },
+            {
+                "name": "no-gpu",
+                "description": "",
+                "maxRunTime": 8,
+                "resources": {
+                    "requests": {
+                        "cpu": "7000m",
+                        "memory": "60G"
+                    },
+                    "limits": {
+                        "cpu": "8000m",
+                        "memory": "60G"
+                    }
+                }
+            }
+        ]
+      },
+    "k8sLogger": {
+        "image": "jobman-k8s-logger:2.1.1",
+        "sleep": 15
+    }
+  },
+  "kubeConfig": {
+      "type": "cluster",
+      "file": null
+  },
+  "harborProjects": [
+      {
+          "name": "chaimeleon-library-batch-public",
+          "token": null,
+          "baseUrl": "https://harbor.chaimeleon-eu.i3m.upv.es"
+      },
+      {
+          "name": "chaimeleon-library-batch",
+          "token": null,
+          "baseUrl": "https://harbor.chaimeleon-eu.i3m.upv.es:5000"
+      },
+      {
+          "name": "chaimeleon-library-batch-protected",
+          "token": "",
+          "baseUrl": "https://harbor.chaimeleon-eu.i3m.upv.es",
+          "imagePullSecrets": [
+            {
+                "name": "protected-regcred"
+            }
+          ]
+      }
+  ],
+  "oidc": {
+      "apiTokenAttributeName": "jobman_service_api_token",
+      "url": "https://PUBLIC_DOMAIN/auth",
+      "realm": "EUCAIM-NODE",
+      "clientId": "jobman-service",
+      "clientSecret": "CLIENT_JOBMAN_SECRET",
+      "audiences": [
+          "jobman-service"
+      ],
+      "resourceAccessRoles": [
+          "manage-own-jobs"
+      ]
+  },
+  "port": 8080,
+  "path": {
+      "prefix": "/jobman-service",
+      "api": "/api/v1"
+  },
+  "defaultKubeURL": "https://PUBLIC_DOMAIN/"
+}
