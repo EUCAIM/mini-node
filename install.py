@@ -1567,14 +1567,6 @@ def configure_kube_apiserver_oidc(CONFIG):
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
 TEMP_YAML="/tmp/kube-apiserver-temp.yaml"
 
-# Remove backup files that might be corrupted
-rm -f "${{APISERVER_YAML}}.backup"
-
-# Backup original (only if not already backed up)
-if [ ! -f "${{APISERVER_YAML}}.original" ]; then
-    cp "$APISERVER_YAML" "${{APISERVER_YAML}}.original"
-fi
-
 # Remove any existing OIDC flags first and save to temp file
 grep -v -- '--oidc-issuer-url' "$APISERVER_YAML" | \\
 grep -v -- '--oidc-client-id' | \\
@@ -1590,9 +1582,9 @@ awk '{{
         print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
         print "    - --oidc-client-id=kubernetes"
         print "    - --oidc-username-claim=preferred_username"
-        print "    - --oidc-username-prefix=oidc:"
+        print "    - '--oidc-username-prefix=oidc:'"
         print "    - --oidc-groups-claim=groups"
-        print "    - --oidc-groups-prefix=oidc:"
+        print "    - '--oidc-groups-prefix=oidc:'"
     }}
 }}' "$TEMP_YAML" > "$APISERVER_YAML"
 
@@ -1612,6 +1604,19 @@ echo "OIDC configuration applied successfully"
     # Run the script by piping it to bash (avoids permission issues with /tmp)
     print(" Modifying kube-apiserver.yaml...")
     cmd("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
+
+    # Ensure oidc prefix values are quoted (trailing colon would break YAML parsing otherwise)
+    print(" Ensuring oidc prefix flags are properly quoted...")
+    fix_quotes_script = r"""#!/bin/bash
+APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
+sed -i "s/    - --oidc-username-prefix=oidc:$/    - '--oidc-username-prefix=oidc:'/" "$APISERVER_YAML"
+sed -i "s/    - --oidc-groups-prefix=oidc:$/    - '--oidc-groups-prefix=oidc:'/" "$APISERVER_YAML"
+echo "OIDC prefix quotes fixed"
+"""
+    with open('/tmp/fix_oidc_quotes.sh', 'w') as f:
+        f.write(fix_quotes_script)
+    cmd("minikube cp /tmp/fix_oidc_quotes.sh minikube:/tmp/fix_oidc_quotes.sh")
+    cmd("minikube ssh -- 'sudo bash /tmp/fix_oidc_quotes.sh'")
 
     # Wait for apiserver to restart (it monitors the manifest file)
     print(" Waiting for kube-apiserver to restart with new configuration...")
@@ -2997,11 +3002,11 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
         # Replace <jobman_host> placeholder with actual domain
         webservice_content = webservice_content.replace('<jobman_host>', CONFIG.public_domain)
 
-        # Fix the Service spec: target -> targetPort
+        # Fix the Service spec: target -> targetPort (source yaml uses 'target' which is not valid K8s)
         webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
 
         # Read and process settings.json template
-        settings_template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "jobman", "settings-template.json")
+        settings_template_file = os.path.join(os.path.expanduser("~"), "mini-node", "jobman-settings.json")
         if os.path.exists(settings_template_file):
             with open(settings_template_file, 'r') as f:
                 settings_content = f.read()
@@ -3024,6 +3029,12 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
             print(f"  You will need to manually configure the webservice-config ConfigMap")
 
         # Write updated webservice to temporary file
+        # Strip Namespace docs - already pre-created above, re-applying them
+        # causes patch errors due to stale last-applied-configuration
+        yaml_docs = webservice_content.split('\n---\n')
+        yaml_docs = [d for d in yaml_docs if 'kind: Namespace' not in d]
+        webservice_content = '\n---\n'.join(yaml_docs)
+
         temp_webservice = "/tmp/jobman-webservice.yaml"
         with open(temp_webservice, 'w') as f:
             f.write(webservice_content)
