@@ -98,9 +98,8 @@ The following must exist in the installation directory:
    # If you do not have SSH keys configured for GitHub, use HTTPS instead:
    # git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
    cd k8s-deploy-node
-   git clone --depth 1 --branch v2.1.5-BETA https://github.com/EUCAIM/jobman.git
+   git clone --depth 1 --branch v2.2.2 https://github.com/EUCAIM/jobman.git
    git clone https://github.com/EUCAIM/dataset-explorer.git
-   git clone https://gihtub.com/EUCAIM/jobman
    ```
 
 The folder structure should look like this:
