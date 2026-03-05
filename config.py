@@ -10,17 +10,37 @@ class Config:
             if key not in cfg:
                 raise ValueError(f"Missing required top-level config key: '{key}'")
 
-        self.host_path = cfg['host_path']
+        # Resolve host_path: replace /home/ubuntu with actual home dir if needed
+        raw_host_path = cfg['host_path']
+        actual_home = os.path.expanduser('~')
+        if '/home/ubuntu' in raw_host_path and actual_home != '/home/ubuntu':
+            resolved = raw_host_path.replace('/home/ubuntu', actual_home)
+            print(f"Warning: host_path in config points to /home/ubuntu but running as {os.environ.get('USER','?')}. "
+                  f"Auto-correcting to: {resolved}")
+            raw_host_path = resolved
+        self.host_path = raw_host_path
         self.public_domain = cfg['public_domain']
         
         # Optional: Use Gateway API instead of traditional Ingress (default: False for backward compatibility)
         self.use_gateway_api = cfg.get('use_gateway_api', False)
+        
+        # COMMENTED: Optional storage provisioning method selection
+        # self.use_storageclass_pvcs = cfg.get('use_storageclass_pvcs', False)
+        # When True: uses StorageClass (0-pvcs-storageclass.yaml) for dynamic provisioning
+        # When False: uses manual PVs with hostPath (0-pvcs.yaml) with specific directory paths
 
         # Subsections
         self.postgres = Config.Postgres(cfg['postgres'])
         self.keycloak = Config.Keycloak(cfg['keycloak'])
         self.guacamole = Config.Guacamole(cfg['guacamole'])
         self.oidc = Config.OIDC(cfg['oidc'])
+        
+        # Optional: Platform admin user (simple fields, not a class)
+        if 'platform_admin_user' in cfg:
+            pa = cfg['platform_admin_user']
+            self.platform_admin_username = pa.get('username')
+            self.platform_admin_email = pa.get('email')
+            self.platform_admin_password = pa.get('password')
         
         # Optional: Let's Encrypt configuration for TLS certificates
         if 'letsencrypt' in cfg:
@@ -29,6 +49,10 @@ class Config:
         # Optional: Tracer service configuration
         if 'tracer' in cfg:
             self.tracer = Config.Tracer(cfg['tracer'])
+
+        # Optional: Focus + Beam proxy configuration
+        if 'focus' in cfg:
+            self.focus = Config.Focus(cfg['focus'])
 
     class Postgres:
         def __init__(self, pg: dict):
@@ -118,6 +142,14 @@ class Config:
     class Tracer:
         def __init__(self, tr: dict):
             self.url = tr.get('url', '')  # URL is optional
+
+    class Focus:
+        def __init__(self, fc: dict):
+            self.provider = fc['provider']
+            self.focus_api_key = fc.get('focus_api_key', '')
+            self.dataset_service_auth_header = fc.get('dataset_service_auth_header', '')
+            self.beam_broker_url = fc.get('beam_broker_url', 'https://broker.eucaim.cancerimage.eu')
+            self.root_crt_pem = fc.get('root_crt_pem', '')
 
 
 def load_config(logger, config_file_path):
