@@ -1981,7 +1981,8 @@ def create_letsencrypt_issuer(CONFIG):
         return
 
     # Path to the ClusterIssuer template
-            template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "cert-manager", "ºº º   º   
+    template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "cert-manager", "cluster-issuer-template.yaml")
+    output_file = "/tmp/cluster-issuer.yaml"
 
     # Check if template exists
     if not os.path.exists(template_file):
