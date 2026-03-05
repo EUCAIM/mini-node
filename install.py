@@ -1836,10 +1836,10 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
 
         # Use helm upgrade --install to install or update Kubeapps
         # --install: Install if not already installed
-        # --force: Force resource updates through delete/recreate if needed (resolves conflicts)
-        # This ensures that any changes in values.yaml are always applied
+        # Note: --force is intentionally omitted; it conflicts with server-side apply in newer Helm versions.
+        # Pod recreation is handled explicitly below instead.
         cmd("helm upgrade --install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps "
-            "--version 17.1.1 --namespace kubeapps --force -f {}".format(private_values_file))
+            "--version 17.1.1 --namespace kubeapps -f {}".format(private_values_file))
 
         print(f"\n Forcing Kubeapps frontend pod recreation to apply new secrets...")
         # Delete the main Kubeapps pod to force recreation with new clientSecret
@@ -1981,8 +1981,7 @@ def create_letsencrypt_issuer(CONFIG):
         return
 
     # Path to the ClusterIssuer template
-    template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "cert-manager", "cluster-issuer-template.yaml")
-    output_file = "/tmp/cluster-issuer.yaml"
+            template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "cert-manager", "ºº º   º   
 
     # Check if template exists
     if not os.path.exists(template_file):
@@ -3003,7 +3002,7 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
         webservice_content = webservice_content.replace('<jobman_host>', CONFIG.public_domain)
 
         # Fix the Service spec: target -> targetPort (source yaml uses 'target' which is not valid K8s)
-        # webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
+        webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
 
         # Read and process settings.json template
         settings_template_file = os.path.join(os.path.expanduser("~"), "mini-node", "jobman-settings.json")
