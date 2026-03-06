@@ -1310,7 +1310,7 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
 
 
     template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service",
-                                  "on-event-jobs", "k8s-templates", "user-management-job-template.yaml")
+                                  "on-event-jobs_mininode", "user-management-job-template.yaml")
 
     # Create .private.yaml file path
     private_file = template_file.replace('.yaml', '.private.yaml')
@@ -1393,8 +1393,8 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     cmd(f"sudo mkdir -p {on_event_jobs_data_dir}")
     cmd(f"sudo mkdir -p {scripts_data_dir}")
     cmd(f"sudo cp {private_file} {on_event_jobs_data_dir}/user-management-job-template.private.yaml")
-    scripts_src_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "on-event-jobs", "scripts")
-    cmd(f"sudo cp -r {scripts_src_dir}/. {scripts_data_dir}/")
+    scripts_src_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "on-event-jobs_mininode")
+    cmd(f"sudo cp {scripts_src_dir}/*.sh {scripts_data_dir}/")
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
     print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
 
