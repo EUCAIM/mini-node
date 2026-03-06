@@ -1386,6 +1386,18 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     print(f" Created private configuration: {private_file}")
     print(f" User management job template configured successfully")
 
+    # Copy the generated private template and scripts to the minikube-data volume path
+    print(f"\n Copying on-event-jobs files to host data path...")
+    on_event_jobs_data_dir = os.path.join(CONFIG.host_path, "dataset-service", "dataset-service-data", "on-event-jobs")
+    scripts_data_dir = os.path.join(on_event_jobs_data_dir, "scripts")
+    cmd(f"sudo mkdir -p {on_event_jobs_data_dir}")
+    cmd(f"sudo mkdir -p {scripts_data_dir}")
+    cmd(f"sudo cp {private_file} {on_event_jobs_data_dir}/user-management-job-template.private.yaml")
+    scripts_src_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "on-event-jobs", "scripts")
+    cmd(f"sudo cp -r {scripts_src_dir}/. {scripts_data_dir}/")
+    cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
+    print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
+
     # Create the required directories on the host
     print(f"\n Creating required directories...")
     homes_base_dir = os.path.join(CONFIG.host_path, "data/homes")
