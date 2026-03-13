@@ -3298,7 +3298,7 @@ def apply_pod_priorities():
 
 
 def install_orthanc(CONFIG):
-    '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
+    '''Install Orthanc PACS server - uses its own orthanc namespace'''
     print(f"\n{'='*80}")
     print(" Installing Orthanc PACS Server")
     print(f"{'='*80}\n")
@@ -3308,61 +3308,59 @@ def install_orthanc(CONFIG):
         orthanc_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "orthanc")
         os.chdir(orthanc_dir)
 
-        # Orthanc now uses dataset-service namespace (no separate namespace needed)
-        print(" Using dataset-service namespace to share PVC...")
+        # Create orthanc namespace
+        print(" Creating orthanc namespace...")
+        cmd("minikube kubectl -- create namespace orthanc --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
-        # Create Orthanc directories in the shared datalake volume
-        print(" Creating Orthanc directories in shared datalake-data PVC...")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/db'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
-        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
+        # Create Orthanc data directories on the host
+        print(" Creating Orthanc data directories...")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/db'")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/dicom'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
 
-        # Clean up OLD orthanc-ohif namespace (previous installation used separate NS + orthanc-storage-pvc)
-        print(" Removing old orthanc-ohif namespace resources...")
-        cmd("minikube kubectl -- delete deployment orthanc -n orthanc-ohif --ignore-not-found=true")
-        cmd("minikube kubectl -- delete replicaset -n orthanc-ohif -l app=orthanc --ignore-not-found=true")
-        cmd("minikube kubectl -- delete pod -n orthanc-ohif -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
+        # Clean up any stale resources from old namespaces
+        print(" Cleaning up any stale Orthanc resources...")
+        for ns in ["orthanc-ohif", "dataset-service"]:
+            cmd(f"minikube kubectl -- delete deployment orthanc -n {ns} --ignore-not-found=true")
+            cmd(f"minikube kubectl -- delete replicaset -n {ns} -l app=orthanc --ignore-not-found=true")
+            cmd(f"minikube kubectl -- delete pod -n {ns} -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
         cmd("minikube kubectl -- delete namespace orthanc-ohif --ignore-not-found=true")
-
-        # Clean up current namespace deployment to clear any stale PVC references
-        print(" Removing any stale Orthanc deployment in dataset-service...")
-        cmd("minikube kubectl -- delete deployment orthanc -n dataset-service --ignore-not-found=true")
-        cmd("minikube kubectl -- delete replicaset -n dataset-service -l app=orthanc --ignore-not-found=true")
-        cmd("minikube kubectl -- delete pod -n dataset-service -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
         cmd("sleep 3")
 
         # Apply ConfigMap
         if os.path.exists("orthanc-cm.yaml"):
-            cmd("minikube kubectl -- apply -f orthanc-cm.yaml")
+            cmd("minikube kubectl -- apply -n orthanc -f orthanc-cm.yaml")
 
-        # Apply Deployment (uses datalake-data PVC in dataset-service namespace)
+        # Apply Deployment
         if os.path.exists("orthanc-deploy.yaml"):
-            cmd("minikube kubectl -- apply -f orthanc-deploy.yaml")
+            cmd("minikube kubectl -- apply -n orthanc -f orthanc-deploy.yaml")
+
+        # Apply PVC if present
+        if os.path.exists("orthanc-pvc.yaml"):
+            cmd("minikube kubectl -- apply -n orthanc -f orthanc-pvc.yaml")
 
         # Handle Ingress/HTTPRoute based on configuration
-        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
 
         if use_gateway_api:
-            # Use HTTPRoute (Gateway API)
             httproute_file = "orthanc-httproute.yaml"
             if os.path.exists(httproute_file):
                 update_ingress_host(httproute_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -f {httproute_file}")
+                cmd(f"minikube kubectl -- apply -n orthanc -f {httproute_file}")
                 print(f" Applied HTTPRoute for Orthanc with domain: {CONFIG.public_domain}")
             else:
                 print(f"  Warning: {httproute_file} not found")
         else:
-            # LEGACY: Use traditional Ingress
             ingress_file = "orthanc-ingress.yaml"
             if os.path.exists(ingress_file):
                 update_ingress_host(ingress_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -f {ingress_file}")
+                cmd(f"minikube kubectl -- apply -n orthanc -f {ingress_file}")
                 print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
             else:
                 print(f"  Warning: {ingress_file} not found")
 
         print(f" Orthanc installation completed")
-        print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
+        print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc")
 
     finally:
         os.chdir(prev_dir)
