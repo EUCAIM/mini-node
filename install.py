@@ -1310,9 +1310,9 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
 
 
     template_file = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service",
-                                  "on-event-jobs_mininode", "user-management-job-template.yaml")
+                                  "on-event-jobs", "k8s-templates", "user-management-job-template.yaml")
 
-    # Create .private.yaml file path
+    # Write private file next to the template (not overwriting the original)
     private_file = template_file.replace('.yaml', '.private.yaml')
 
     if not os.path.exists(template_file):
@@ -1372,7 +1372,7 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
         '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
         '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',
-        '__K8S_ENDPOINT__': f'https://{CONFIG.public_domain}:6443',
+        '__K8S_ENDPOINT__': f'https://{cmd_output("minikube ip").strip()}:8443',
         '__K8S_TOKEN__': k8s_token,
     }
 
@@ -1393,8 +1393,14 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     cmd(f"sudo mkdir -p {on_event_jobs_data_dir}")
     cmd(f"sudo mkdir -p {scripts_data_dir}")
     cmd(f"sudo cp {private_file} {on_event_jobs_data_dir}/user-management-job-template.private.yaml")
-    scripts_src_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "on-event-jobs_mininode")
+    # Copy k8s-templates dir (contains user-management-job-template.yaml)
+    k8s_templates_src = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "on-event-jobs", "k8s-templates")
+    cmd(f"sudo cp -r {k8s_templates_src} {on_event_jobs_data_dir}/k8s-templates")
+    # Copy all scripts: .sh files, Python files, and the templates/ subdirectory
+    scripts_src_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "on-event-jobs", "scripts")
     cmd(f"sudo cp {scripts_src_dir}/*.sh {scripts_data_dir}/")
+    cmd(f"sudo cp {scripts_src_dir}/*.py {scripts_data_dir}/")
+    cmd(f"sudo cp -r {scripts_src_dir}/templates {scripts_data_dir}/templates")
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
     print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
 
@@ -1537,11 +1543,158 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
     finally:
         os.chdir(prev_dir)
 
+def repair_kube_apiserver():
+    '''Attempt to recover a broken kube-apiserver by stopping/starting minikube.
+    This regenerates the kube-apiserver manifest from minikube defaults,
+    discarding any corrupt modifications.'''
+    print("\n" + "="*80)
+    print(" RECOVERING broken kube-apiserver")
+    print("="*80 + "\n")
+
+    # Try to restore from backup first (faster than full restart)
+    backup_exists = subprocess.run(
+        ["minikube", "ssh", "--", "sudo", "test", "-f",
+         "/etc/kubernetes/manifests/kube-apiserver.yaml.bak"],
+        capture_output=True
+    ).returncode == 0
+
+    if backup_exists:
+        print(" Found kube-apiserver.yaml backup — restoring...")
+        cmd("minikube ssh -- 'sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml.bak "
+            "/etc/kubernetes/manifests/kube-apiserver.yaml'")
+        print(" Manifest restored from backup.")
+    else:
+        print(" No backup found — performing minikube stop/start to regenerate manifest...")
+        print(" (This may take 1-2 minutes)")
+        cmd("minikube stop", exit_on_error=False)
+        time.sleep(5)
+        cmd("minikube start")
+
+    print(" Waiting for kube-apiserver to come back up...")
+    ok = wait_for_apiserver(max_wait=180, context="post-repair", _skip_repair=True)
+    if ok:
+        print(" kube-apiserver recovered successfully.")
+        if backup_exists:
+            print(" NOTE: OIDC / token-auth-file flags were stripped; re-run install to re-apply them.")
+    else:
+        print(" ERROR: kube-apiserver still not responding after repair attempt.")
+        print("   Try manually: minikube delete && minikube start")
+    return ok
+
+
+def wait_for_apiserver(max_wait: int = 120, context: str = "", _skip_repair: bool = False):
+    '''Wait until kube-apiserver is healthy and responding to kubectl'''
+    label = f" [{context}]" if context else ""
+    print(f" Waiting for kube-apiserver to be ready...{label}")
+    # Give kubelet a moment to notice the manifest change before polling
+    time.sleep(5)
+    waited = 0
+    while waited < max_wait:
+        result = subprocess.run(
+            ["minikube", "kubectl", "--", "get", "--raw=/healthz"],
+            capture_output=True, text=True
+        )
+        if result.returncode == 0 and "ok" in result.stdout.lower():
+            print(f" kube-apiserver is ready ({waited + 5}s elapsed){label}")
+            return True
+
+        # Check whether the apiserver container has actually crashed
+        if not _skip_repair:
+            pod_check = subprocess.run(
+                ["minikube", "ssh", "--",
+                 "sudo crictl ps -a --name kube-apiserver 2>/dev/null | grep -v NAME"],
+                capture_output=True, text=True
+            )
+            pod_out = pod_check.stdout.strip()
+            # If the row shows Exited/Error/OOMKilled, the container crashed
+            if pod_out and any(s in pod_out for s in ["Exited", "Error", "OOM"]):
+                print(f"  kube-apiserver container is in a failed state: {pod_out.split(chr(10))[0]}")
+                print("  Attempting automatic recovery...")
+                return repair_kube_apiserver()
+
+        time.sleep(5)
+        waited += 5
+        if waited % 20 == 0:
+            print(f"   Still waiting for apiserver... ({waited + 5}s){label}")
+    print(f"  Warning: apiserver did not become ready within {max_wait}s{label}")
+    print("   Check manually: minikube kubectl -- get --raw=/healthz")
+    return False
+
+
 def configure_kube_apiserver_oidc(CONFIG):
     '''Configure kube-apiserver with OIDC authentication for Kubeapps'''
     print(f"\n{'='*80}")
     print(" Configuring kube-apiserver with OIDC")
     print(f"{'='*80}\n")
+
+    # --- Token auth file setup ---
+    # Generate token.csv from the user-management-sa-token k8s secret.
+    # The file is injected into the minikube VM via ~/.minikube/files so it is
+    # available at /etc/ca-certificates/token.csv inside the VM, which is the
+    # path passed to --token-auth-file in the apiserver.
+    print(" Setting up token-auth-file for kube-apiserver...")
+    token_csv_src = os.path.join(SCRIPT_DIR, "token.csv")
+    minikube_files_dir = os.path.expanduser("~/.minikube/files/etc/ca-certificates")
+    token_csv_dst = os.path.join(minikube_files_dir, "token.csv")
+
+    # Extract token from the service account secret (created in configure_user_management_job_template)
+    print(" Extracting token from user-management-sa-token secret...")
+    sa_token = cmd_output(
+        "minikube kubectl -- get secret user-management-sa-token -n dataset-service "
+        "-o jsonpath='{.data.token}' 2>/dev/null | base64 -d"
+    ).strip()
+
+    if not sa_token:
+        print("  Warning: Could not extract token from user-management-sa-token secret, skipping token-auth-file setup")
+    else:
+        # Write token.csv: format is  token,username,uid,"group1,group2"
+        with open(token_csv_src, 'w') as f:
+            f.write(f"{sa_token},user-management-sa,user-management-sa,\"system:masters\"\n")
+        print(f" token.csv generated at {token_csv_src}")
+
+        cmd(f"mkdir -p {minikube_files_dir}")
+        cmd(f"cp {token_csv_src} {token_csv_dst}")
+        print(f" token.csv copied to {token_csv_dst}")
+
+        # Patch kube-apiserver manifest to add --token-auth-file if not already present
+        print(" Patching kube-apiserver manifest with --token-auth-file...")
+        token_patch_script = r"""#!/bin/bash
+set -e
+APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
+BACKUP_YAML="${APISERVER_YAML}.bak"
+
+# Always keep an up-to-date backup
+cp "$APISERVER_YAML" "$BACKUP_YAML"
+
+if grep -q 'token-auth-file' "$APISERVER_YAML"; then
+    echo "--token-auth-file already present, skipping"
+else
+    sed -i '/--tls-private-key-file/a\    - --token-auth-file=/etc/ca-certificates/token.csv' "$APISERVER_YAML"
+    echo "--token-auth-file added"
+fi
+
+# Sanity-check the manifest (no PyYAML needed inside VM)
+# Must be non-empty, contain apiVersion, and not have truncated lines
+if [ ! -s "$APISERVER_YAML" ]; then
+    echo "YAML_INVALID — file is empty, restoring backup"
+    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    exit 1
+fi
+if ! grep -q 'apiVersion:' "$APISERVER_YAML" || ! grep -q 'kube-apiserver' "$APISERVER_YAML"; then
+    echo "YAML_INVALID — missing required fields, restoring backup"
+    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    exit 1
+fi
+echo "YAML_VALID"
+"""
+        with open('/tmp/patch_token_auth.sh', 'w') as f:
+            f.write(token_patch_script)
+        cmd("minikube cp /tmp/patch_token_auth.sh minikube:/tmp/patch_token_auth.sh")
+        cmd("minikube ssh -- 'sudo bash /tmp/patch_token_auth.sh'")
+        print(" kube-apiserver patched with --token-auth-file")
+
+        # The manifest change triggers a kubelet restart; wait before checking OIDC.
+        wait_for_apiserver(max_wait=120, context="token-auth-file patch")
 
     # OIDC configuration flags
     oidc_flags = [
@@ -1577,33 +1730,57 @@ def configure_kube_apiserver_oidc(CONFIG):
     modify_script = f'''set -e
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
+BACKUP_YAML="${{APISERVER_YAML}}.bak"
 TEMP_YAML="/tmp/kube-apiserver-temp.yaml"
+FINAL_YAML="/tmp/kube-apiserver-final.yaml"
+
+# Always keep a backup before touching the manifest
+cp "$APISERVER_YAML" "$BACKUP_YAML"
+echo "Backup saved to $BACKUP_YAML"
 
 # Remove any existing OIDC flags first and save to temp file
-grep -v -- '--oidc-issuer-url' "$APISERVER_YAML" | \\
-grep -v -- '--oidc-client-id' | \\
-grep -v -- '--oidc-username-claim' | \\
-grep -v -- '--oidc-username-prefix' | \\
-grep -v -- '--oidc-groups-claim' | \\
-grep -v -- '--oidc-groups-prefix' > "$TEMP_YAML"
+grep -v -- \x27--oidc-issuer-url\x27 "$APISERVER_YAML" | \\
+grep -v -- \x27--oidc-client-id\x27 | \\
+grep -v -- \x27--oidc-username-claim\x27 | \\
+grep -v -- \x27--oidc-username-prefix\x27 | \\
+grep -v -- \x27--oidc-groups-claim\x27 | \\
+grep -v -- \x27--oidc-groups-prefix\x27 > "$TEMP_YAML"
 
-# Find the line with --tls-private-key-file and insert OIDC flags after it
-awk '{{
-    print $0
-    if ($0 ~ /--tls-private-key-file/) {{
-        print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
-        print "    - --oidc-client-id=kubernetes"
-        print "    - --oidc-username-claim=preferred_username"
-        print "    - '--oidc-username-prefix=oidc:'"
-        print "    - --oidc-groups-claim=groups"
-        print "    - '--oidc-groups-prefix=oidc:'"
+# Insert OIDC flags after --tls-private-key-file
+awk \'\n    {{
+        print $0
+        if ($0 ~ /--tls-private-key-file/) {{
+            print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
+            print "    - --oidc-client-id=kubernetes"
+            print "    - --oidc-username-claim=preferred_username"
+            print "    - \x27--oidc-username-prefix=oidc:\x27"
+            print "    - --oidc-groups-claim=groups"
+            print "    - \x27--oidc-groups-prefix=oidc:\x27"
+        }}
     }}
-}}' "$TEMP_YAML" > "$APISERVER_YAML"
+\' "$TEMP_YAML" > "$FINAL_YAML"
 
-# Clean up
-rm -f "$TEMP_YAML"
+# Sanity-check the result (no PyYAML needed inside VM)
+# Must be non-empty, contain apiVersion, and include the OIDC flag we just added
+if [ ! -s "$FINAL_YAML" ]; then
+    echo "YAML_INVALID after OIDC patch — file is empty, restoring backup"
+    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    exit 1
+fi
+if ! grep -q 'apiVersion:' "$FINAL_YAML" || ! grep -q 'kube-apiserver' "$FINAL_YAML"; then
+    echo "YAML_INVALID after OIDC patch — missing required fields, restoring backup"
+    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    exit 1
+fi
+if ! grep -q 'oidc-issuer-url' "$FINAL_YAML"; then
+    echo "YAML_INVALID after OIDC patch — oidc flags missing, restoring backup"
+    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    exit 1
+fi
+cp "$FINAL_YAML" "$APISERVER_YAML"
+echo "OIDC configuration applied and manifest validated OK"
 
-echo "OIDC configuration applied successfully"
+rm -f "$TEMP_YAML" "$FINAL_YAML"
 '''
 
     # Write script to temp file
@@ -1613,44 +1790,14 @@ echo "OIDC configuration applied successfully"
     # Copy script to minikube
     cmd("minikube cp /tmp/modify_apiserver.sh minikube:/tmp/modify_apiserver.sh")
 
-    # Run the script by piping it to bash (avoids permission issues with /tmp)
+    # Run the script
     print(" Modifying kube-apiserver.yaml...")
     cmd("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
-
-    # Ensure oidc prefix values are quoted (trailing colon would break YAML parsing otherwise)
-    print(" Ensuring oidc prefix flags are properly quoted...")
-    fix_quotes_script = r"""#!/bin/bash
-APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
-sed -i "s/    - --oidc-username-prefix=oidc:$/    - '--oidc-username-prefix=oidc:'/" "$APISERVER_YAML"
-sed -i "s/    - --oidc-groups-prefix=oidc:$/    - '--oidc-groups-prefix=oidc:'/" "$APISERVER_YAML"
-echo "OIDC prefix quotes fixed"
-"""
-    with open('/tmp/fix_oidc_quotes.sh', 'w') as f:
-        f.write(fix_quotes_script)
-    cmd("minikube cp /tmp/fix_oidc_quotes.sh minikube:/tmp/fix_oidc_quotes.sh")
-    cmd("minikube ssh -- 'sudo bash /tmp/fix_oidc_quotes.sh'")
 
     # Wait for apiserver to restart (it monitors the manifest file)
     print(" Waiting for kube-apiserver to restart with new configuration...")
     print("  (This may take 30-60 seconds)")
-    time.sleep(10)
-
-    # Wait for apiserver to be ready
-    max_wait = 120
-    waited = 0
-    while waited < max_wait:
-        result = cmd("minikube kubectl -- get --raw=/healthz 2>/dev/null", exit_on_error=False)
-        if result == 0:
-            print(f" kube-apiserver is ready with OIDC configuration")
-            break
-        time.sleep(5)
-        waited += 5
-        if waited % 15 == 0:
-            print(f"   Still waiting for apiserver... ({waited}s)")
-
-    if waited >= max_wait:
-        print(f"  Warning: apiserver took longer than expected to restart")
-        print(f"   You may need to check manually with: kubectl get pods -n kube-system")
+    wait_for_apiserver(max_wait=120, context="OIDC patch")
 
     # Verify OIDC configuration
     print("\n Verifying OIDC configuration...")
@@ -2085,11 +2232,44 @@ def install_api_gateway(CONFIG):
         return False
 
 
-def create_iptables_rules_script():
+def create_iptables_rules_script(use_gateway_api: bool = False):
     '''Create and apply iptables rules for external access to minikube ingress'''
     print("Setting up iptables rules for external access...")
 
-    # Get ingress-nginx service info to extract nodeports using kubectl
+    # Determine which ingress controller to query based on the mode
+    if use_gateway_api:
+        svc_name = "traefik"
+        svc_namespace = "traefik"
+        http_port_name = "web"
+        https_port_name = "websecure"
+        controller_desc = "Traefik"
+    else:
+        svc_name = "ingress-nginx-controller"
+        svc_namespace = "ingress-nginx"
+        http_port_name = "http"
+        https_port_name = "https"
+        controller_desc = "ingress-nginx"
+
+    # Pre-wait: ensure the service actually exists before querying NodePorts
+    print(f"Waiting for {controller_desc} service '{svc_name}' in namespace '{svc_namespace}' to exist...")
+    svc_wait_retries = 20
+    for attempt in range(svc_wait_retries):
+        check = subprocess.run(
+            ["minikube", "kubectl", "--", "get", "svc", svc_name, "-n", svc_namespace],
+            capture_output=True, text=True
+        )
+        if check.returncode == 0:
+            print(f"  Service '{svc_name}' found.")
+            break
+        print(f"  Service not yet available (attempt {attempt + 1}/{svc_wait_retries}), waiting 5s...")
+        time.sleep(5)
+    else:
+        print(f"ERROR: Service '{svc_name}' in namespace '{svc_namespace}' did not appear after {svc_wait_retries} attempts.")
+        print(f"Please ensure {controller_desc} is installed and running:")
+        print(f"  minikube kubectl -- get svc -n {svc_namespace}")
+        sys.exit(1)
+
+    # Get service nodeports
     http_nodeport = None
     https_nodeport = None
 
@@ -2099,8 +2279,8 @@ def create_iptables_rules_script():
     while retry_count < max_retries:
         try:
             result = subprocess.run(
-                ["minikube", "kubectl", "--", "get", "svc", "ingress-nginx-controller", "-n", "ingress-nginx",
-                 "-o", "jsonpath={.spec.ports[?(@.name==\"http\")].nodePort},{.spec.ports[?(@.name==\"https\")].nodePort}"],
+                ["minikube", "kubectl", "--", "get", "svc", svc_name, "-n", svc_namespace,
+                 "-o", f"jsonpath={{.spec.ports[?(@.name==\"{http_port_name}\")].nodePort}},{{.spec.ports[?(@.name==\"{https_port_name}\")].nodePort}}"],
                 capture_output=True, text=True, check=True
             )
             ports = result.stdout.strip().split(',')
@@ -2108,24 +2288,24 @@ def create_iptables_rules_script():
             if len(ports) == 2 and ports[0] and ports[1]:
                 http_nodeport = ports[0]
                 https_nodeport = ports[1]
-                print(f"Detected NodePorts from ingress-nginx service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
+                print(f"Detected NodePorts from {controller_desc} service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
                 break
             else:
-                print(f"Warning: Could not parse nodeports (attempt {retry_count + 1}/{max_retries}), retrying...")
+                print(f"Warning: Could not parse nodeports from {controller_desc} (attempt {retry_count + 1}/{max_retries}), retrying...")
                 retry_count += 1
                 if retry_count < max_retries:
-                    time.sleep(2)
+                    time.sleep(5)
 
         except subprocess.CalledProcessError as e:
-            print(f"Warning: Could not get ingress service info (attempt {retry_count + 1}/{max_retries}): {e}")
+            print(f"Warning: Could not get {controller_desc} service info (attempt {retry_count + 1}/{max_retries}): {e}")
             retry_count += 1
             if retry_count < max_retries:
-                time.sleep(2)
+                time.sleep(5)
 
     if not http_nodeport or not https_nodeport:
-        print("ERROR: Could not detect NodePorts from ingress-nginx service after multiple attempts.")
-        print("Please ensure ingress-nginx is installed and running:")
-        print("  minikube kubectl -- get svc -n ingress-nginx")
+        print(f"ERROR: Could not detect NodePorts from {controller_desc} service after multiple attempts.")
+        print(f"Please ensure {controller_desc} is installed and running:")
+        print(f"  minikube kubectl -- get svc -n {svc_namespace}")
         sys.exit(1)
 
     # Get minikube IP
@@ -3110,7 +3290,7 @@ def apply_pod_priorities():
         file_path = os.path.join(priorities_dir, priority_file)
         if os.path.exists(file_path):
             print(f" Applying {priority_file}...")
-            cmd(f"minikube kubectl -- apply -f {file_path}")
+            cmd(f"minikube kubectl -- apply --validate=false -f {file_path}")
         else:
             print(f"  Warning: {priority_file} not found, skipping")
 
@@ -3210,6 +3390,10 @@ def install(flavor):
     print(f" Configuration loaded from: {DEFAULT_CONFIG_FILE_PATH}")
     print(f" Domain: {CONFIG.public_domain}")
 
+    # Ensure kube-apiserver is up and responding before doing any kubectl work.
+    # A previous partial run may have patched the manifest and left it mid-restart.
+    wait_for_apiserver(max_wait=300, context="pre-install")
+
     # Check if Gateway API should be used (default: False for backward compatibility)
     use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
 
@@ -3237,8 +3421,13 @@ def install(flavor):
     print(f"{'='*80}\n")
     configure_kube_apiserver_oidc(CONFIG)
 
+    # Safety-net: ensure apiserver is fully responding before any kubectl calls.
+    # Both the token-auth-file patch and the OIDC patch can trigger restarts;
+    # the early-return path (already configured) may not wait long enough.
+    wait_for_apiserver(max_wait=180, context="post-apiserver-config")
+
     # Create iptables rules for external access
-    create_iptables_rules_script()
+    create_iptables_rules_script(use_gateway_api=use_gateway_api)
 
     # Install cert-manager (needed for TLS certificates)
     cert_manager_available = install_cert_manager(CONFIG)
@@ -3368,7 +3557,14 @@ def install(flavor):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("FLAVOR", help="Which flavor to install (micro, mini, standard)", nargs="?", default="")
+    parser.add_argument("--repair-apiserver", action="store_true",
+                        help="Attempt to recover a broken kube-apiserver and exit")
     args = parser.parse_args()
+
+    if args.repair_apiserver:
+        CONFIG = load_config(logging.root, DEFAULT_CONFIG_FILE_PATH)
+        ok = repair_kube_apiserver()
+        exit(0 if ok else 1)
 
     flavor = str(args.FLAVOR).lower()
     while flavor not in FLAVORS:
