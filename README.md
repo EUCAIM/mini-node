@@ -94,9 +94,9 @@ The following must exist in the installation directory:
    git clone <this-repo-url>
    cd mini-node
    # Clone k8s-deploy-node (mininode branch) 
-   git clone --branch mininode git@github.com:EUCAIM/k8s-deploy-node.git
+   # git clone --branch mininode git@github.com:EUCAIM/k8s-deploy-node.git
    # If you do not have SSH keys configured for GitHub, use HTTPS instead:
-   # git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
+   git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
    cd k8s-deploy-node
    git clone --depth 1 --branch v2.2.4 https://github.com/EUCAIM/jobman.git
    git clone https://github.com/EUCAIM/dataset-explorer.git
