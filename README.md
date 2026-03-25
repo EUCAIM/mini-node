@@ -77,32 +77,37 @@ The following tools must be installed before running the installation:
 
 ## External Dependencies
 
-### Git Repositories (Auto-cloned)
+### Git Repositories (Auto-cloned during installation)
 
-The installation automatically clones these repositories when needed:
+The installation script automatically clones these repositories when needed:
 
 1. **helm-chart-guacamole**
    - URL: `https://github.com/chaimeleon-eu/helm-chart-guacamole.git`
    - Purpose: Helm chart for Guacamole deployment
 
-2. **k8s-chaimeleon-operator**
-   - URL: `https://github.com/chaimeleon-eu/k8s-chaimeleon-operator.git`
-   - Purpose: DSWS (Data Science Workspace) operator
-
-3. **upv-node-workstation-images**
+2. **upv-node-workstation-images**
    - URL: `https://github.com/EUCAIM/upv-node-workstation-images.git`
    - Purpose: Workstation Docker images and Helm charts
 
-### Required Repository (Manual Setup)
+### Required Repositories (Manual Setup)
 
+These must be cloned manually before running the installation:
 
-- **k8s-deploy-node**
-  - URL: `git@github.com:EUCAIM/k8s-deploy-node.git`
-  - Location: Must be in the same directory as `install.py`
-  - Purpose: Contains all Helm charts and Kubernetes configurations
-  
+- **k8s-deploy-node** — all Helm charts and Kubernetes manifests
   ```bash
-  git clone git@github.com:EUCAIM/k8s-deploy-node.git
+  git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
+  ```
+
+- **jobman** — job manager service *(cloned inside k8s-deploy-node)*
+  ```bash
+  cd k8s-deploy-node
+  git clone --depth 1 --branch v2.2.5 https://github.com/EUCAIM/jobman.git
+  ```
+
+- **dataset-explorer** — web frontend *(cloned inside k8s-deploy-node)*
+  ```bash
+  git clone https://github.com/EUCAIM/dataset-explorer.git
+  cd ..
   ```
 
 
@@ -117,6 +122,96 @@ The installation automatically clones these repositories when needed:
 2. **eucaim-node-realm.private.json** - Keycloak realm configuration
    - Template: `eucaim-node-realm.json`
    - Contains: client secrets, realm settings, identity providers
+
+### Configuration Templates
+
+The `config.yaml` file is the template — copy it to get started:
+
+```bash
+cp config.yaml config.private.yaml
+```
+
+Full structure of `config.yaml`:
+
+```yaml
+host_path: "/home/ubuntu/minikube-data2/"
+  # The path in the host that it is shared to the node services
+
+public_domain: "mininode.imaging.i3m.upv.es"
+  # The public domain where the node will be accessible
+
+postgres:
+  db_password: "yourdbpassword"
+  username: "yourusername"
+  database: "yourdatabase"
+
+use_gateway_api: true
+
+tracer:
+  url: ""
+
+keycloak:
+  admin_username: "admin"
+    # The name of the admin user
+  admin_password: "supersecret_admin"
+    # The password to access the admin console of users management
+  db_password: "supersecret_db"
+    # The password for the keycloak database user
+  admin_emails: "admin@example.com,admin2@example.com"
+    # Comma-separated list of admin emails to notify new user registrations
+  idp_lsri:
+    enabled: "false"
+    client_id: "xxxxxxxxx"
+    client_secret: "xxxxxxxxx"
+
+# Optional: Platform administrator user (cluster admin)
+platform_admin_user:
+  username: "platform-admin"
+  email: "platform-admin@example.com"
+  password: "supersecret_platform_admin"
+    # This user will have administrative access to the entire platform
+
+guacamole:
+  hostname: "postgresql"
+  port: "5432"
+  username: "guacamole"
+  password: "password"
+  database: "guacamole"
+  adminPassword: "xxxxxxxxx"
+
+oidc:
+  authorization_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/auth"
+  jwks_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs"
+  issuer: "https://[]/auth/realms/EUCAIM-NODE"
+  clientID: "guacamole"
+  redirect_uri: "https://[]/guacamole/"
+  username_claim_type: "preferred_username"
+  groups_claim_type: "groups"
+
+letsencrypt:
+  email: "admin@i3m.upv.es"
+  use_staging: false
+
+focus:
+  provider: "YOUR_PROV"
+    # Short provider identifier, e.g. 'upv' — used in beam app IDs
+  focus_api_key: "changeme"
+    # API key for the focus application (from beam broker registration)
+  dataset_service_auth_header: "Basic changeme"
+    # Authorization header value for dataset-service API calls (Base64 encoded credentials)
+  beam_broker_url: "https://broker.eucaim.cancerimage.eu"
+    # URL of the EUCAIM beam broker
+  root_crt_pem: |
+    -----BEGIN CERTIFICATE-----
+    REPLACE_WITH_BROKER_ROOT_CA_PEM
+    -----END CERTIFICATE-----
+    # PEM-encoded root CA certificate of the beam broker (for TLS verification)
+  proxy_private_key_pem: |
+    -----BEGIN PRIVATE KEY-----
+    REPLACE_WITH_PROXY_PRIVATE_KEY_PEM
+    -----END PRIVATE KEY-----
+    # PEM-encoded private key of this node's beam proxy certificate (not base64, raw PEM)
+```
 
 ## Installation Steps
 
@@ -151,7 +246,7 @@ In `--release kubernetes` mode the following minikube-specific steps are **skipp
    cd ..
    ```
 
-2. **Create configuration files**
+2. **Create configuration files** *(see [Configuration Templates](#configuration-templates) above for the full structure)*
    ```bash
    cp config.yaml config.private.yaml
    nano config.private.yaml
@@ -188,7 +283,7 @@ In `--release kubernetes` mode the following minikube-specific steps are **skipp
    cd ..
    ```
 
-2. **Create configuration files**
+2. **Create configuration files** *(see [Configuration Templates](#configuration-templates) above for the full structure)*
    ```bash
    cp config.yaml config.private.yaml
    nano config.private.yaml
@@ -266,7 +361,7 @@ Installation logs are written to:
 
 ## Security Notes
 
-⚠️ **Never commit these files to public repositories:**
+ **Never commit these files to public repositories:**
 - `config.private.yaml`
 - `eucaim-node-realm.private.json`
 - Any files ending in `.private.*`
