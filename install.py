@@ -3552,7 +3552,6 @@ if __name__ == '__main__':
                         help="Kubernetes release type: 'minikube' (default) or 'kubernetes'")
     args = parser.parse_args()
 
-    global RELEASE, KUBECTL
     RELEASE = args.release
     KUBECTL = "minikube kubectl --" if RELEASE == "minikube" else "kubectl"
     print(f" Release mode: {RELEASE}  (kubectl command: '{KUBECTL}')")
