@@ -1,4 +1,3 @@
-
 # EUCAIM Node Installation
 
 This repository contains the installation and configuration scripts for deploying a complete EUCAIM node infrastructure on Kubernetes.
@@ -7,16 +6,15 @@ This repository contains the installation and configuration scripts for deployin
 
 The installation script (`install.py`) automates the deployment of:
 - Keycloak (authentication/authorization)
-- Dataset Service 
-- Dataset Explorer 
-- Guacamole 
-- Jobman
+- Dataset Service (core data management)
+- Dataset Explorer (web frontend)
+- Guacamole (remote desktop gateway)
 - Harbor (container registry)
 - Kubeapps (application management)
 - Kubernetes Dashboard
 - DSWS Operator (workspace management)
-- Traefik 
-- cert-manager 
+- Traefik (ingress controller)
+- cert-manager (SSL certificate management)
 
 ## Prerequisites
 
@@ -29,10 +27,19 @@ The installation script (`install.py`) automates the deployment of:
 
 The following tools must be installed before running the installation:
 
-1. **Minikube** (for development/single-node setup)
+1. **Minikube** *(only for development/single-node setup — skip if using a production Kubernetes cluster)*
    ```bash
    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
    sudo install minikube-linux-amd64 /usr/local/bin/minikube
+   ```
+
+   For production Kubernetes, ensure **`kubectl`** is installed and your kubeconfig is configured to point to the target cluster:
+   ```bash
+   # Example: install kubectl
+   curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+   sudo install kubectl /usr/local/bin/kubectl
+   # Verify cluster access
+   kubectl cluster-info
    ```
 
 2. **Helm** (Kubernetes package manager)
@@ -68,13 +75,40 @@ The following tools must be installed before running the installation:
    ```
 
 
+## External Dependencies
+
+### Git Repositories (Auto-cloned)
+
+The installation automatically clones these repositories when needed:
+
+1. **helm-chart-guacamole**
+   - URL: `https://github.com/chaimeleon-eu/helm-chart-guacamole.git`
+   - Purpose: Helm chart for Guacamole deployment
+
+2. **k8s-chaimeleon-operator**
+   - URL: `https://github.com/chaimeleon-eu/k8s-chaimeleon-operator.git`
+   - Purpose: DSWS (Data Science Workspace) operator
+
+3. **upv-node-workstation-images**
+   - URL: `https://github.com/EUCAIM/upv-node-workstation-images.git`
+   - Purpose: Workstation Docker images and Helm charts
+
+### Required Repository (Manual Setup)
 
 
+- **k8s-deploy-node**
+  - URL: `git@github.com:EUCAIM/k8s-deploy-node.git`
+  - Location: Must be in the same directory as `install.py`
+  - Purpose: Contains all Helm charts and Kubernetes configurations
+  
+  ```bash
+  git clone git@github.com:EUCAIM/k8s-deploy-node.git
+  ```
 
-### Required Source Code
 
-The following must exist in the installation directory:
+## Configuration Files
 
+### Required Files
 
 1. **config.private.yaml** - Main configuration file
    - Template: `config.yaml`
@@ -84,47 +118,191 @@ The following must exist in the installation directory:
    - Template: `eucaim-node-realm.json`
    - Contains: client secrets, realm settings, identity providers
 
+### Configuration Templates
 
+Example `config.yaml` structure:
+```yaml
+public_domain: "your-domain.com"
+postgres:
+  username: "postgres"
+  password: "your-postgres-password"
+  database: "eucaimdb"
+keycloak:
+  username: "admin"
+  password: "your-keycloak-admin-password"
+guacamole:
+  adminPassword: "your-guacamole-admin-password"
+  username: "guacamole_user"
+  password: "your-guacamole-db-password"
+  database: "guacamole_db"
+oidc:
+  authorization_endpoint: "https://your-domain.com/auth/realms/EUCAIM-NODE/protocol/openid-connect/auth"
+  jwks_endpoint: "https://your-domain.com/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs"
+  issuer: "https://your-domain.com/auth/realms/EUCAIM-NODE"
+  clientID: "dataset-explorer"
+letsencrypt:
+  email: "admin@your-domain.com"
+  use_staging: false  # Set to true for testing
+```
 
 ## Installation Steps
+
+The script supports two deployment targets, selected via the `--release` flag:
+
+| Flag | Target | kubectl command used |
+|---|---|---|
+| `--release minikube` *(default)* | Minikube single-node VM | `minikube kubectl --` |
+| `--release kubernetes` | Production Kubernetes cluster | `kubectl` |
+
+In `--release kubernetes` mode the following minikube-specific steps are **skipped automatically**:
+- Minikube ingress addon management
+- kube-apiserver OIDC patching (done via SSH into the minikube VM)
+- iptables rules for NodePort exposure
+- kube-apiserver crash detection and repair
+
+---
+
+### Option A — Minikube (development / single-node)
 
 1. **Prepare the environment**
    ```bash
    # Clone this repository
    git clone <this-repo-url>
-   cd mini-node
-   # Clone k8s-deploy-node (mininode branch) 
-   # git clone --branch mininode git@github.com:EUCAIM/k8s-deploy-node.git
-   # If you do not have SSH keys configured for GitHub, use HTTPS instead:
+   cd <repo-directory>
+
+   # Clone k8s-deploy-node (mininode branch)
    git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
    cd k8s-deploy-node
    git clone --depth 1 --branch v2.2.5 https://github.com/EUCAIM/jobman.git
    git clone https://github.com/EUCAIM/dataset-explorer.git
+   cd ..
    ```
-
-The folder structure should look like this:
-
-```
-<working-directory>/
-└── mini-node/
-   ├── k8s-deploy-node/
-```
 
 2. **Create configuration files**
    ```bash
-   # Copy and edit the configuration template
    cp config.yaml config.private.yaml
    nano config.private.yaml
-   
-   # Copy and edit the Keycloak realm template
+
    cp eucaim-node-realm.json eucaim-node-realm.private.json
    nano eucaim-node-realm.private.json
    ```
-3. **Start minikube with your local folder mounted into the cluster**
+
+3. **Start Minikube** with the host data folder mounted
    ```bash
-   minikube start --mount --mount-string="/home/ubuntu/folderspecyfiedinconfig.yaml:/var/hostpath-provisioner"
+   minikube start --mount --mount-string="/home/ubuntu/<host-data-path>:/var/hostpath-provisioner"
    ```
-5. **Run the installation**
+
+4. **Run the installation**
    ```bash
-   python3 install.py <flavour>
+   python3 install.py <flavor>              # flavor: micro | mini | standard
+   # or explicitly:
+   python3 install.py <flavor> --release minikube
    ```
+
+---
+
+### Option B — Production Kubernetes cluster
+
+1. **Prepare the environment** *(same as Minikube — clone repos and config files)*
+   ```bash
+   git clone <this-repo-url>
+   cd <repo-directory>
+
+   git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
+   cd k8s-deploy-node
+   git clone --depth 1 --branch v2.2.5 https://github.com/EUCAIM/jobman.git
+   git clone https://github.com/EUCAIM/dataset-explorer.git
+   cd ..
+   ```
+
+2. **Create configuration files**
+   ```bash
+   cp config.yaml config.private.yaml
+   nano config.private.yaml
+
+   cp eucaim-node-realm.json eucaim-node-realm.private.json
+   nano eucaim-node-realm.private.json
+   ```
+
+3. **Ensure `kubectl` is configured** for the target cluster
+   ```bash
+   kubectl cluster-info   # must respond before running install
+   ```
+
+4. **Run the installation**
+   ```bash
+   python3 install.py <flavor> --release kubernetes
+   ```
+
+   > **Note:** OIDC configuration for the Kubernetes API server and firewall rules
+   > must be set up manually when using a production cluster, as they depend on
+   > direct SSH access to the control-plane node (handled automatically only in
+   > Minikube mode).
+
+## Utility Scripts
+
+### create_guacamole_admin.py
+Creates the `guacamole-admin` user in Keycloak if it doesn't exist.
+
+```bash
+python3 create_guacamole_admin.py
+```
+
+### set_guacamole_admin_password.py
+Updates the password for the `guacamole-admin` user in Keycloak.
+
+```bash
+python3 set_guacamole_admin_password.py
+```
+
+### configure_user_management.py
+Reconfigures the user management job template without reinstalling everything.
+
+```bash
+python3 configure_user_management.py
+```
+
+## Support Modules
+
+- **auth.py** - Authentication client for Keycloak
+- **config.py** - Configuration parser and validator
+- **keycloak_admin_api.py** - Keycloak Admin API client
+
+## Network Requirements
+
+The installation requires internet access to:
+- GitHub (for cloning repositories)
+- Docker Hub (for pulling container images)
+- Helm chart repositories
+- Let's Encrypt (for SSL certificates)
+
+## Troubleshooting
+
+### Common Issues
+
+1. **Missing k8s-deploy-node**: Ensure you've cloned the repository manually
+2. **Build failures**: Check that Node.js and Docker are properly installed
+3. **SSL certificate issues**: Verify Let's Encrypt email and domain configuration
+4. **Resource constraints**: Ensure sufficient CPU/RAM for Minikube
+
+### Logs
+
+Installation logs are written to:
+- `install.log` - Main installation log
+- Individual component logs in namespace-specific locations
+
+## Security Notes
+
+⚠️ **Never commit these files to public repositories:**
+- `config.private.yaml`
+- `eucaim-node-realm.private.json`
+- Any files ending in `.private.*`
+- Password files like `guacamole-eucaim-user-creator-password.txt`
+
+## License
+
+[Add your license information here]
+
+## Support
+
+[Add support contact information here]
