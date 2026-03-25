@@ -118,33 +118,6 @@ The installation automatically clones these repositories when needed:
    - Template: `eucaim-node-realm.json`
    - Contains: client secrets, realm settings, identity providers
 
-### Configuration Templates
-
-Example `config.yaml` structure:
-```yaml
-public_domain: "your-domain.com"
-postgres:
-  username: "postgres"
-  password: "your-postgres-password"
-  database: "eucaimdb"
-keycloak:
-  username: "admin"
-  password: "your-keycloak-admin-password"
-guacamole:
-  adminPassword: "your-guacamole-admin-password"
-  username: "guacamole_user"
-  password: "your-guacamole-db-password"
-  database: "guacamole_db"
-oidc:
-  authorization_endpoint: "https://your-domain.com/auth/realms/EUCAIM-NODE/protocol/openid-connect/auth"
-  jwks_endpoint: "https://your-domain.com/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs"
-  issuer: "https://your-domain.com/auth/realms/EUCAIM-NODE"
-  clientID: "dataset-explorer"
-letsencrypt:
-  email: "admin@your-domain.com"
-  use_staging: false  # Set to true for testing
-```
-
 ## Installation Steps
 
 The script supports two deployment targets, selected via the `--release` flag:
