@@ -21,9 +21,15 @@ DEFAULT_CONFIG_FILE_PATH = "config.private.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
 ##WHY None?  Because CONFIG is set later after parsing args in main
 CONFIG = None
+## Release type: "minikube" or "kubernetes" — set by --release CLI flag
+RELEASE = "minikube"
+## kubectl command prefix — "minikube kubectl --" for minikube, "kubectl" for standard k8s
+KUBECTL = "minikube kubectl --"
 
 ## Function to execute shell commands
 def cmd(command, exit_on_error=True):
+    # Transparently swap the kubectl prefix based on the selected release
+    command = command.replace("minikube kubectl --", KUBECTL)
     print(command)
     ret = os.system(command)
     if exit_on_error and ret != 0: exit(1)
@@ -32,6 +38,8 @@ def cmd(command, exit_on_error=True):
 ## To get command output as string
 def cmd_output(command):
     '''Execute command and return output as string'''
+    # Transparently swap the kubectl prefix based on the selected release
+    command = command.replace("minikube kubectl --", KUBECTL)
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
         return result.stdout
@@ -482,6 +490,9 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     os.chdir("..")
 
 def ensure_ingress_addon():
+    if RELEASE != "minikube":
+        print(" Skipping minikube ingress addon check (release=kubernetes)")
+        return
     print("Checking minikube ingress addon...")
     ret = cmd("minikube addons list | grep 'ingress' | grep 'enabled'", exit_on_error=False)
     if ret != 0:
@@ -1367,12 +1378,16 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         '__KEYCLOAK_CLIENT__': 'dataset-service',
         '__KEYCLOAK_CLIENT_SECRET__': auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET,
         '__GUACAMOLE_ENDPOINT__': 'http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/',
-        '__GUACAMOLE_ADMIN_USER__': 'eucaim-user-creator',
-        '__GUACAMOLE_ADMIN_PASSWORD__': guacamole_user_creator_password,
+        '__GUACAMOLE_ADMIN_USER__': 'guacamole-admin',
+        '__GUACAMOLE_ADMIN_PASSWORD__': CONFIG.guacamole.adminPassword,
         '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
         '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
         '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',
-        '__K8S_ENDPOINT__': f'https://{cmd_output("minikube ip").strip()}:8443',
+        '__K8S_ENDPOINT__': (
+            f'https://{cmd_output("minikube ip").strip()}:8443'
+            if RELEASE == "minikube" else
+            cmd_output("kubectl cluster-info 2>/dev/null | grep -oP 'https://[0-9.:]+' | head -1").strip() or "https://localhost:6443"
+        ),
         '__K8S_TOKEN__': k8s_token,
     }
 
@@ -1547,35 +1562,24 @@ def repair_kube_apiserver():
     '''Attempt to recover a broken kube-apiserver by stopping/starting minikube.
     This regenerates the kube-apiserver manifest from minikube defaults,
     discarding any corrupt modifications.'''
+    if RELEASE != "minikube":
+        print(" Skipping kube-apiserver repair (not applicable for release=kubernetes)")
+        return True
     print("\n" + "="*80)
     print(" RECOVERING broken kube-apiserver")
     print("="*80 + "\n")
 
-    # Try to restore from backup first (faster than full restart)
-    backup_exists = subprocess.run(
-        ["minikube", "ssh", "--", "sudo", "test", "-f",
-         "/etc/kubernetes/manifests/kube-apiserver.yaml.bak"],
-        capture_output=True
-    ).returncode == 0
-
-    if backup_exists:
-        print(" Found kube-apiserver.yaml backup — restoring...")
-        cmd("minikube ssh -- 'sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml.bak "
-            "/etc/kubernetes/manifests/kube-apiserver.yaml'")
-        print(" Manifest restored from backup.")
-    else:
-        print(" No backup found — performing minikube stop/start to regenerate manifest...")
-        print(" (This may take 1-2 minutes)")
-        cmd("minikube stop", exit_on_error=False)
-        time.sleep(5)
-        cmd("minikube start")
+    print(" Performing minikube stop/start to regenerate manifest...")
+    print(" (This may take 1-2 minutes)")
+    cmd("minikube stop", exit_on_error=False)
+    time.sleep(5)
+    cmd("minikube start")
 
     print(" Waiting for kube-apiserver to come back up...")
     ok = wait_for_apiserver(max_wait=180, context="post-repair", _skip_repair=True)
     if ok:
         print(" kube-apiserver recovered successfully.")
-        if backup_exists:
-            print(" NOTE: OIDC / token-auth-file flags were stripped; re-run install to re-apply them.")
+        print(" NOTE: OIDC / token-auth-file flags were stripped; re-run install to re-apply them.")
     else:
         print(" ERROR: kube-apiserver still not responding after repair attempt.")
         print("   Try manually: minikube delete && minikube start")
@@ -1591,15 +1595,15 @@ def wait_for_apiserver(max_wait: int = 120, context: str = "", _skip_repair: boo
     waited = 0
     while waited < max_wait:
         result = subprocess.run(
-            ["minikube", "kubectl", "--", "get", "--raw=/healthz"],
+            KUBECTL.split() + ["get", "--raw=/healthz"],
             capture_output=True, text=True
         )
         if result.returncode == 0 and "ok" in result.stdout.lower():
             print(f" kube-apiserver is ready ({waited + 5}s elapsed){label}")
             return True
 
-        # Check whether the apiserver container has actually crashed
-        if not _skip_repair:
+        # Check whether the apiserver container has actually crashed (minikube only)
+        if not _skip_repair and RELEASE == "minikube":
             pod_check = subprocess.run(
                 ["minikube", "ssh", "--",
                  "sudo crictl ps -a --name kube-apiserver 2>/dev/null | grep -v NAME"],
@@ -1617,7 +1621,7 @@ def wait_for_apiserver(max_wait: int = 120, context: str = "", _skip_repair: boo
         if waited % 20 == 0:
             print(f"   Still waiting for apiserver... ({waited + 5}s){label}")
     print(f"  Warning: apiserver did not become ready within {max_wait}s{label}")
-    print("   Check manually: minikube kubectl -- get --raw=/healthz")
+    print(f"   Check manually: {KUBECTL} get --raw=/healthz")
     return False
 
 
@@ -1661,10 +1665,6 @@ def configure_kube_apiserver_oidc(CONFIG):
         token_patch_script = r"""#!/bin/bash
 set -e
 APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
-BACKUP_YAML="${APISERVER_YAML}.bak"
-
-# Always keep an up-to-date backup
-cp "$APISERVER_YAML" "$BACKUP_YAML"
 
 if grep -q 'token-auth-file' "$APISERVER_YAML"; then
     echo "--token-auth-file already present, skipping"
@@ -1674,15 +1674,12 @@ else
 fi
 
 # Sanity-check the manifest (no PyYAML needed inside VM)
-# Must be non-empty, contain apiVersion, and not have truncated lines
 if [ ! -s "$APISERVER_YAML" ]; then
-    echo "YAML_INVALID — file is empty, restoring backup"
-    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    echo "YAML_INVALID — file is empty"
     exit 1
 fi
 if ! grep -q 'apiVersion:' "$APISERVER_YAML" || ! grep -q 'kube-apiserver' "$APISERVER_YAML"; then
-    echo "YAML_INVALID — missing required fields, restoring backup"
-    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    echo "YAML_INVALID — missing required fields"
     exit 1
 fi
 echo "YAML_VALID"
@@ -1730,13 +1727,8 @@ echo "YAML_VALID"
     modify_script = f'''set -e
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
-BACKUP_YAML="${{APISERVER_YAML}}.bak"
 TEMP_YAML="/tmp/kube-apiserver-temp.yaml"
 FINAL_YAML="/tmp/kube-apiserver-final.yaml"
-
-# Always keep a backup before touching the manifest
-cp "$APISERVER_YAML" "$BACKUP_YAML"
-echo "Backup saved to $BACKUP_YAML"
 
 # Remove any existing OIDC flags first and save to temp file
 grep -v -- \x27--oidc-issuer-url\x27 "$APISERVER_YAML" | \\
@@ -1763,18 +1755,15 @@ awk \'\n    {{
 # Sanity-check the result (no PyYAML needed inside VM)
 # Must be non-empty, contain apiVersion, and include the OIDC flag we just added
 if [ ! -s "$FINAL_YAML" ]; then
-    echo "YAML_INVALID after OIDC patch — file is empty, restoring backup"
-    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    echo "YAML_INVALID after OIDC patch — file is empty"
     exit 1
 fi
 if ! grep -q 'apiVersion:' "$FINAL_YAML" || ! grep -q 'kube-apiserver' "$FINAL_YAML"; then
-    echo "YAML_INVALID after OIDC patch — missing required fields, restoring backup"
-    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    echo "YAML_INVALID after OIDC patch — missing required fields"
     exit 1
 fi
 if ! grep -q 'oidc-issuer-url' "$FINAL_YAML"; then
-    echo "YAML_INVALID after OIDC patch — oidc flags missing, restoring backup"
-    cp "$BACKUP_YAML" "$APISERVER_YAML"
+    echo "YAML_INVALID after OIDC patch — oidc flags missing"
     exit 1
 fi
 cp "$FINAL_YAML" "$APISERVER_YAML"
@@ -3412,20 +3401,22 @@ def install(flavor):
     # Apply RBAC roles and bindings
     apply_roles_and_bindings()
 
-    # Configure kube-apiserver with OIDC (required for Kubeapps)
-    # This is done after ingress addon is enabled to avoid conflicts
-    print(f"\n{'='*80}")
-    print(" Configuring kube-apiserver with OIDC")
-    print(f"{'='*80}\n")
-    configure_kube_apiserver_oidc(CONFIG)
+    # Configure kube-apiserver with OIDC and iptables rules — minikube only
+    if RELEASE == "minikube":
+        print(f"\n{'='*80}")
+        print(" Configuring kube-apiserver with OIDC")
+        print(f"{'='*80}\n")
+        configure_kube_apiserver_oidc(CONFIG)
 
-    # Safety-net: ensure apiserver is fully responding before any kubectl calls.
-    # Both the token-auth-file patch and the OIDC patch can trigger restarts;
-    # the early-return path (already configured) may not wait long enough.
-    wait_for_apiserver(max_wait=180, context="post-apiserver-config")
+        # Safety-net: ensure apiserver is fully responding before any kubectl calls.
+        # Both the token-auth-file patch and the OIDC patch can trigger restarts;
+        # the early-return path (already configured) may not wait long enough.
+        wait_for_apiserver(max_wait=180, context="post-apiserver-config")
 
-    # Create iptables rules for external access
-    create_iptables_rules_script(use_gateway_api=use_gateway_api)
+        # Create iptables rules for external access
+        create_iptables_rules_script(use_gateway_api=use_gateway_api)
+    else:
+        print(" Skipping kube-apiserver OIDC config and iptables rules (release=kubernetes)")
 
     # Install cert-manager (needed for TLS certificates)
     cert_manager_available = install_cert_manager(CONFIG)
@@ -3557,7 +3548,14 @@ if __name__ == '__main__':
     parser.add_argument("FLAVOR", help="Which flavor to install (micro, mini, standard)", nargs="?", default="")
     parser.add_argument("--repair-apiserver", action="store_true",
                         help="Attempt to recover a broken kube-apiserver and exit")
+    parser.add_argument("--release", choices=["minikube", "kubernetes"], default="minikube",
+                        help="Kubernetes release type: 'minikube' (default) or 'kubernetes'")
     args = parser.parse_args()
+
+    global RELEASE, KUBECTL
+    RELEASE = args.release
+    KUBECTL = "minikube kubectl --" if RELEASE == "minikube" else "kubectl"
+    print(f" Release mode: {RELEASE}  (kubectl command: '{KUBECTL}')")
 
     if args.repair_apiserver:
         CONFIG = load_config(logging.root, DEFAULT_CONFIG_FILE_PATH)
