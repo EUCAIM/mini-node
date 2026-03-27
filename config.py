@@ -5,7 +5,7 @@ import yaml
 class Config:
     def __init__(self, cfg: dict):
         # Top-level required keys
-        required_top = ['host_path', 'public_domain', 'postgres', 'keycloak', 'guacamole', 'oidc']
+        required_top = ['host_path', 'public_domain', 'postgres', 'keycloak', 'oidc']
         for key in required_top:
             if key not in cfg:
                 raise ValueError(f"Missing required top-level config key: '{key}'")
@@ -32,7 +32,6 @@ class Config:
         # Subsections
         self.postgres = Config.Postgres(cfg['postgres'])
         self.keycloak = Config.Keycloak(cfg['keycloak'])
-        self.guacamole = Config.Guacamole(cfg['guacamole'])
         self.oidc = Config.OIDC(cfg['oidc'])
         
         # Optional: Platform admin user (simple fields, not a class)
@@ -98,19 +97,6 @@ class Config:
                 self.enabled = idp.get('enabled', 'false')
                 self.client_id = idp.get('client_id', '')
                 self.client_secret = idp.get('client_secret', '')
-
-    class Guacamole:
-        def __init__(self, gu: dict):
-            required = ['adminPassword', 'username', 'password', 'database']
-            for key in required:
-                if key not in gu:
-                    raise ValueError(f"Missing required guacamole config key: '{key}'")
-            self.adminPassword = gu['adminPassword']
-            self.username = gu['username']
-            self.password = gu['password']
-            self.database = gu['database']
-            self.hostname = gu['hostname']
-            self.port = gu['port']
 
     class OIDC:
         def __init__(self, od: dict):

@@ -12,8 +12,8 @@ import subprocess
 import time
 import sys
 
-from keycloak_admin_api import KeycloakAdminAPIClient
-from auth import AuthClient
+# from keycloak_admin_api import KeycloakAdminAPIClient
+# from auth import AuthClient
 from config import *
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -1062,7 +1062,7 @@ def install_dataset_explorer(CONFIG):
     finally:
         os.chdir(prev_dir)
 
-def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_secrets):
+def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth_client_secrets):
     prev_dir = os.getcwd()
     try:
         guacamole = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "guacamole")
@@ -1088,49 +1088,52 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
             print("Adapted postgresql-pvc.yaml for Guacamole: solo PVC y storageClassName: standard")
         cmd("minikube kubectl -- apply -f postgresql-pvc.yaml -n guacamole")
 
-        # 1. Update PostgreSQL values (write both public and private values)
-        values_file = "postgresql-values.yaml"
-        private_values_file = "postgresql-values.private.yaml"
-        with open(values_file, 'r') as f:
+        # 1. Update PostgreSQL values in a private file
+        postgresql_values_file = "postgresql-values.yaml"
+        postgresql_private_values_file = "postgresql-values.private.yaml"
+        username = "guacamole"
+        password = generate_random_password(16)
+        database = "guacamole"
+        adminUsername = "guacamole-admin"
+        adminLocalPassword = generate_random_password(16)
+        
+        with open(postgresql_values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
 
         data.setdefault('auth', {})
         data['auth'].update({
-            'adminPassword': CONFIG.guacamole.adminPassword,
-            'username': CONFIG.guacamole.username,
-            'password': CONFIG.guacamole.password,
-            'database': CONFIG.guacamole.database,
+            'postgresPassword': password,
+            'username': username,
+            'password': password,
+            'database': database,
         })
 
         # Note: image tag/repository are managed directly in the values files
 
         # Do not modify image fields here; image configuration stays in the values files
 
-        # Write both public and private values files so the installer can use the private one
-        with open(values_file, 'w') as f:
-            yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
-        with open(private_values_file, 'w') as f:
+        # Write private values file so the installer can use it
+        with open(postgresql_private_values_file, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
 
         # 2. Update Guacamole values (Postgres + OIDC)
-        guaca_file = "guacamole-values.yaml"
-        with open(guaca_file, 'r') as f:
-            data_pg = yaml.safe_load(f) or {}
+        guacamole_values_file = "guacamole-values.yaml"
+        guacamole_values_private_file = "guacamole-values.private.yaml"
 
+        with open(guacamole_values_file, 'r') as f:
+            data_pg = yaml.safe_load(f) or {}
 
         pg = data_pg.setdefault('postgres', {})
         pg.update({
-            'database': CONFIG.guacamole.database,
-            'user': CONFIG.guacamole.username,
-            'password': CONFIG.guacamole.password,
-            'hostname': CONFIG.guacamole.hostname,
-            'port': CONFIG.guacamole.port
+            'database': database,
+            'user': username,
+            'password': password
         })
-
 
         dbcreation = data_pg.setdefault('dbcreation', {})
         dbcreation.update({
-            'adminLocalPassword': CONFIG.guacamole.adminPassword
+            'adminUsername': adminUsername,
+            'adminLocalPassword': adminLocalPassword
         })
 
         oidc_cfg = data_pg.setdefault('OIDC', {})
@@ -1167,15 +1170,9 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
                     if tls_entry.get('secretName'):
                         tls_entry['secretName'] = CONFIG.public_domain
 
-        with open(guaca_file, 'w') as f:
-            yaml.dump(data_pg, f, default_flow_style=False, sort_keys=False, indent=2)
-
         # Write a private guacamole values file without altering image fields
-        guaca_private_file = "guacamole-values.private.yaml"
-        with open(guaca_private_file, 'w') as f:
+        with open(guacamole_values_private_file, 'w') as f:
             yaml.dump(data_pg, f, default_flow_style=False, sort_keys=False, indent=2)
-
-        private_post_values = "postgresql-values.private.yaml"
 
         print(f"\n Checking if PostgreSQL for Guacamole is already installed...")
         pg_check = cmd("minikube kubectl -- get deployment -n guacamole -l app.kubernetes.io/name=postgresql -o name 2>/dev/null | wc -l", exit_on_error=False)
@@ -1185,11 +1182,9 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
             cmd("helm uninstall postgresql --namespace guacamole || true")
 
             # Use helm upgrade --install to be more resilient
-            pg_install = cmd(
-                f"helm upgrade --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql \
-                 --version 15.5.29 --namespace guacamole -f {private_post_values}",
-                exit_on_error=False
-            )
+            pg_install = cmd(f"helm upgrade --install postgresql oci://registry-1.docker.io/bitnamicharts/postgresql"
+                             f"             --version 15.5.29 --namespace guacamole -f {postgresql_private_values_file}",
+                             exit_on_error=False)
 
             if pg_install != 0:
                 print(f"  Warning: PostgreSQL installation failed (likely Docker Hub rate limit)")
@@ -1215,11 +1210,7 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
 
         # Install or upgrade Guacamole using helm upgrade --install
         print(f"\n Installing/upgrading Guacamole...")
-        guac_install = cmd(
-            f"helm upgrade --install guacamole ./{chart_dir} \
-             --namespace guacamole -f guacamole-values.yaml",
-            exit_on_error=False
-        )
+        guac_install = cmd(f"helm upgrade --install guacamole ./{chart_dir} --namespace guacamole -f {guacamole_values_private_file}", exit_on_error=False)
 
         if guac_install != 0:
             print(f"  Warning: Guacamole installation/upgrade failed")
@@ -1245,25 +1236,25 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
             else:
                 print(f"  Warning: {httproute_file} not found")
 
-        # Create guacamole-admin user in Keycloak
-        try:
-            print(f"\n Creating guacamole-admin user in Keycloak...")
-            auth_endpoint = f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token"
-            auth_client = AuthClient(auth_endpoint, 'dataset-service', login_as_service_account=True,
-                                   client_secret=auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
-            keycloak_admin_api_endpoint = f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
-            admin_client = KeycloakAdminAPIClient(auth_client, keycloak_admin_api_endpoint)
+        # # Create guacamole-admin user in Keycloak
+        # try:
+        #     print(f"\n Creating guacamole-admin user in Keycloak...")
+        #     auth_endpoint = f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token"
+        #     auth_client = AuthClient(auth_endpoint, 'dataset-service', login_as_service_account=True,
+        #                            client_secret=auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
+        #     keycloak_admin_api_endpoint = f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
+        #     admin_client = KeycloakAdminAPIClient(auth_client, keycloak_admin_api_endpoint)
 
-            admin_client.createSpecialUser(
-                username="guacamole-admin",
-                email="guacamole-admin@test.com",
-                firstName="Guacamole",
-                lastName="Admin"
-            )
-            print(f" guacamole-admin user created successfully in Keycloak")
-        except Exception as e:
-            print(f"  Warning: Could not create guacamole-admin user: {e}")
-            print(f"   This user can be created manually via Keycloak admin UI if needed")
+        #     admin_client.createSpecialUser(
+        #         username="guacamole-admin",
+        #         email="guacamole-admin@test.com",
+        #         firstName="Guacamole",
+        #         lastName="Admin"
+        #     )
+        #     print(f" guacamole-admin user created successfully in Keycloak")
+        # except Exception as e:
+        #     print(f"  Warning: Could not create guacamole-admin user: {e}")
+        #     print(f"   This user can be created manually via Keycloak admin UI if needed")
 
         # Install guacli (Guacamole CLI) if not already installed
         print(f"\n Installing guacli (Guacamole CLI tool)...")
@@ -1303,10 +1294,10 @@ def install_guacamole(CONFIG, guacamole_user_creator_password: str, auth_client_
         cmd("sleep 15")
 
         # Create admin group and eucaim-user-creator user using guacli
-        print(f" Creating Guacamole admin group and user...")
-        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"guacamole-admin\" --password \"{CONFIG.guacamole.adminPassword}\" \
+        print(f" Creating Guacamole admin group and user-creator...")
+        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
             create admin-group cloud-services-and-security-management", exit_on_error=False)
-        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"guacamole-admin\" --password \"{CONFIG.guacamole.adminPassword}\" \
+        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
             create admin-user eucaim-user-creator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
 
     finally:
@@ -1378,8 +1369,8 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         '__KEYCLOAK_CLIENT__': 'dataset-service',
         '__KEYCLOAK_CLIENT_SECRET__': auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET,
         '__GUACAMOLE_ENDPOINT__': 'http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/',
-        '__GUACAMOLE_ADMIN_USER__': 'guacamole-admin',
-        '__GUACAMOLE_ADMIN_PASSWORD__': CONFIG.guacamole.adminPassword,
+        '__GUACAMOLE_ADMIN_USER__': 'eucaim-user-creator',
+        '__GUACAMOLE_ADMIN_PASSWORD__': guacamole_user_creator_password,
         '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
         '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
         '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',

@@ -35,14 +35,6 @@ platform_admin_user:
   password: "supersecret_platform_admin"
     # This user will have administrative access to the entire platform
 
-guacamole:
-  hostname: "postgresql"
-  port: "5432"
-  username: "guacamole"
-  password: "password"
-  database: "guacamole"
-  adminPassword: "xxxxxxxxx"
-
 oidc:
   authorization_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/auth"
   jwks_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs"
