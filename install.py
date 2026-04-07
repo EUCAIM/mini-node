@@ -12,8 +12,8 @@ import subprocess
 import time
 import sys
 
-# from keycloak_admin_api import KeycloakAdminAPIClient
-# from auth import AuthClient
+from keycloak_admin_api import KeycloakAdminAPIClient
+from auth import AuthClient
 from config import *
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -21,15 +21,9 @@ DEFAULT_CONFIG_FILE_PATH = "config.private.yaml"
 K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
 ##WHY None?  Because CONFIG is set later after parsing args in main
 CONFIG = None
-## Release type: "minikube" or "kubernetes" — set by --release CLI flag
-RELEASE = "minikube"
-## kubectl command prefix — "minikube kubectl --" for minikube, "kubectl" for standard k8s
-KUBECTL = "minikube kubectl --"
 
 ## Function to execute shell commands
 def cmd(command, exit_on_error=True):
-    # Transparently swap the kubectl prefix based on the selected release
-    command = command.replace("minikube kubectl --", KUBECTL)
     print(command)
     ret = os.system(command)
     if exit_on_error and ret != 0: exit(1)
@@ -38,8 +32,6 @@ def cmd(command, exit_on_error=True):
 ## To get command output as string
 def cmd_output(command):
     '''Execute command and return output as string'''
-    # Transparently swap the kubectl prefix based on the selected release
-    command = command.replace("minikube kubectl --", KUBECTL)
     try:
         result = subprocess.run(command, shell=True, capture_output=True, text=True)
         return result.stdout
@@ -490,9 +482,6 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     os.chdir("..")
 
 def ensure_ingress_addon():
-    if RELEASE != "minikube":
-        print(" Skipping minikube ingress addon check (release=kubernetes)")
-        return
     print("Checking minikube ingress addon...")
     ret = cmd("minikube addons list | grep 'ingress' | grep 'enabled'", exit_on_error=False)
     if ret != 0:
@@ -739,17 +728,16 @@ def install_dataset_service(auth_client_secret: str):
         keycloak_ready = False
 
         while waited < max_wait:
-            keycloak_check = cmd("minikube kubectl -- get pods -n keycloak -l app=keycloak -o jsonpath='{.items[0].status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null", exit_on_error=False)
-            if keycloak_check == 0:
-                # Check if we got "True" in the output
-                result = cmd_output("minikube kubectl -- get pods -n keycloak -l app=keycloak -o jsonpath='{.items[0].status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null")
-                if result.strip() == "'True'" or result.strip() == "True":
-                    print(f" Keycloak is ready (waited {waited}s)")
-                    keycloak_ready = True
-                    # Give it a few more seconds to fully start serving requests
-                    print(f"   Waiting additional 10s for Keycloak to be fully ready...")
-                    time.sleep(10)
-                    break
+            result = cmd_output(
+                "minikube kubectl -- get pods -n keycloak -l app=keycloak "
+                "-o jsonpath='{.items[0].status.conditions[?(@.type==\"Ready\")].status}' 2>/dev/null"
+            ).strip()
+            if result in ("True", "'True'"):
+                print(f" Keycloak is ready (waited {waited}s)")
+                keycloak_ready = True
+                print(f"   Waiting additional 10s for Keycloak to be fully ready...")
+                time.sleep(10)
+                break
 
             time.sleep(5)
             waited += 5
@@ -861,6 +849,21 @@ def install_dataset_service(auth_client_secret: str):
             print("Warning: Could not find DATASET_SERVICE_CONFIG to update password and tokens.")
 
         # Apply resources
+        # Ensure kube-apiserver is responsive before applying (it may have restarted for OIDC config)
+        print(f" Waiting for kube-apiserver to be ready before applying manifests...")
+        api_waited = 0
+        while api_waited < 120:
+            api_ok = cmd_output("minikube kubectl -- get --raw=/healthz 2>/dev/null").strip()
+            if api_ok == "ok":
+                print(f" API server ready")
+                break
+            time.sleep(5)
+            api_waited += 5
+            if api_waited % 20 == 0:
+                print(f"   Still waiting for API server... ({api_waited}s)")
+        else:
+            print(f"  Warning: API server may not be ready, proceeding anyway")
+
         cmd(f"minikube kubectl -- apply -f {db_service_file} -n dataset-service")
         cmd("minikube kubectl -- apply -f 0-service-account.yaml -n dataset-service")
 
@@ -937,6 +940,7 @@ def install_dataset_explorer(CONFIG):
 
         if os.path.exists(config_file):
             import json
+            import re
 
             # Backup original file
             backup_file = "config-mini-node.json.backup"
@@ -944,43 +948,27 @@ def install_dataset_explorer(CONFIG):
                 cmd(f"cp {config_file} {backup_file}")
 
             with open(config_file, 'r') as f:
-                config_data = json.load(f)
+                raw = f.read()
 
-            # Update all URLs with configured domain
             domain = CONFIG.public_domain
 
-            # Update datasetService URLs
-            if 'datasetService' in config_data:
-                config_data['datasetService']['api'] = f"https://{domain}/dataset-service/api"
-                config_data['datasetService']['projectLogo'] = f"https://{domain}/dataset-service"
+            # Detect the old node domain from the file itself (first https:// URL that
+            # is NOT a well-known external host like github.com, zenodo.org, etc.)
+            external_hosts = {'github.com', 'zenodo.org', 'www.zenodo.org'}
+            old_domain = None
+            for m in re.finditer(r'https?://([a-zA-Z0-9._-]+)', raw):
+                host = m.group(1)
+                if host not in external_hosts and host != domain:
+                    old_domain = host
+                    break
 
-            # Update tracerService URL
-            config_data['tracerService'] = f"https://{domain}/tracer-service/tracer/api/v1"
+            if old_domain:
+                print(f" Replacing old domain '{old_domain}' → '{domain}' in {config_file}")
+                raw = raw.replace(old_domain, domain)
+            else:
+                print(f" No old domain detected in {config_file}, skipping domain replacement")
 
-            # Update appsDashboard URL
-            config_data['appsDashboard'] = f"https://{domain}/apps"
-
-            # Update userAccountUrl
-            config_data['userAccountUrl'] = f"https://{domain}/auth/realms/EUCAIM-NODE/account"
-
-            # Update keycloak.config (url, realm)
-            if 'keycloak' in config_data and 'config' in config_data['keycloak']:
-                config_data['keycloak']['config']['url'] = f"https://{domain}/auth/"
-                config_data['keycloak']['config']['realm'] = "EUCAIM-NODE"
-
-            # Update project.name
-            if 'project' in config_data:
-                config_data['project']['name'] = "EUCAIM-NODE"
-
-            # Update externalServices links
-            if 'externalServices' in config_data:
-                for service in config_data['externalServices']:
-                    if service.get('name') == 'App Dashboard':
-                        service['link'] = f"https://{domain}/apps/"
-                    elif service.get('name') == 'Desktop Apps Access':
-                        service['link'] = f"https://{domain}/guacamole/"
-                    elif service.get('name') == 'Case Explorer':
-                        service['link'] = f"https://{domain}/qpinsights"
+            config_data = json.loads(raw)
 
             # Write updated config back to config-mini-node.json
             with open(config_file, 'w') as f:
@@ -991,14 +979,6 @@ def install_dataset_explorer(CONFIG):
                 json.dump(config_data, f, indent=2)
 
             print(f" Updated {config_file} with domain: {domain}")
-            print(f"   - datasetService.api: https://{domain}/dataset-service/api")
-            print(f"   - tracerService: https://{domain}/tracer-service/tracer/api/v1")
-            print(f"   - appsDashboard: https://{domain}/apps")
-            print(f"   - userAccountUrl: https://{domain}/auth/realms/EUCAIM-NODE/account")
-            print(f"   - keycloak.config.url: https://{domain}/auth/")
-            print(f"   - keycloak.config.realm: EUCAIM-NODE")
-            print(f"   - project.name: EUCAIM-NODE")
-            print(f"   - externalServices: Updated all service links")
             print("\n=== Final config-mini-node.json configuration ===")
             print(json.dumps(config_data, indent=2))
             print("=" * 50 + "\n")
@@ -1062,6 +1042,84 @@ def install_dataset_explorer(CONFIG):
     finally:
         os.chdir(prev_dir)
 
+def install_fem_client(CONFIG: Config, auth_client_secrets: Auth_client_secrets):
+    """Deploy the FEM (Federated Execution Module) client into the eucaim-fed-computation namespace."""
+
+    print(f"\n{'='*80}")
+    print(" Installing FEM Client")
+    print(f"{'='*80}\n")
+
+    fem_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "fem-client")
+
+    # --- Substitute domain and client secret in cm-fem.yaml → cm-fem.private.yaml ---
+    cm_src  = os.path.join(fem_dir, "cm-fem.yaml")
+    cm_priv = os.path.join(fem_dir, "cm-fem.private.yaml")
+
+    with open(cm_src, "r") as f:
+        cm_content = f.read()
+
+    cm_content = cm_content.replace(
+        "eucaim-node.i3m.upv.es",
+        CONFIG.public_domain
+    )
+    cm_content = cm_content.replace(
+        '"client_secret": "xxxxx"',
+        f'"client_secret": "{auth_client_secrets.CLIENT_FEM_CLIENT_SECRET}"'
+    )
+
+    with open(cm_priv, "w") as f:
+        f.write(cm_content)
+
+    print(f" Generated {cm_priv} (domain → {CONFIG.public_domain})")
+
+    # --- Warn if secret-fem.yaml still contains placeholder values, generate valid private copy ---
+    secret_file = os.path.join(fem_dir, "secret-fem.yaml")
+    secret_priv = os.path.join(fem_dir, "secret-fem.private.yaml")
+    with open(secret_file, "r") as f:
+        secret_content = f.read()
+
+    # Replace any placeholder values with empty-string base64 ("") so kubectl doesn't reject it
+    import re as _re
+    has_placeholders = bool(_re.search(r'<[^>]+>', secret_content))
+    if has_placeholders:
+        print("\n WARNING: secret-fem.yaml contains placeholder values.")
+        print("   Applying with empty certificates — FEM will start but RabbitMQ connection will fail")
+        print("   until you populate the real certs and re-run: kubectl apply -f secret-fem.yaml -n eucaim-fed-computation")
+        print(f"   File: {secret_file}\n")
+        # Replace anything between < > with valid empty base64 ("")
+        secret_content = _re.sub(r'<[^>]+>', '""', secret_content)
+    with open(secret_priv, "w") as f:
+        f.write(secret_content)
+
+    # --- Ensure the namespace exists ---
+    cmd("minikube kubectl -- create namespace eucaim-fed-computation --dry-run=client -o yaml | minikube kubectl -- apply -f -")
+
+    # --- Ensure the homes directory exists on the host ---
+    homes_path = os.path.join(CONFIG.host_path, "data", "homes", "users")
+    cmd(f"sudo mkdir -p {homes_path}")
+    cmd(f"sudo chmod 0755 {homes_path}")
+    print(f" Ensured homes directory: {homes_path}")
+
+    # --- Apply manifests in order ---
+    manifests = [
+        os.path.join(fem_dir, "pvs-fem.yaml"),
+        secret_priv,
+        cm_priv,
+        os.path.join(fem_dir, "service-fem.yaml"),
+        os.path.join(fem_dir, "deploy-fem.yaml"),
+    ]
+
+    for manifest in manifests:
+        print(f" Applying {os.path.basename(manifest)} ...")
+        cmd(f"minikube kubectl -- apply -f {manifest}", exit_on_error=False)
+
+    # --- Wait for the deployment to roll out ---
+    print("\n Waiting for fem-client deployment to be ready (timeout 180s)...")
+    cmd("minikube kubectl -- rollout status deployment/fem-client -n eucaim-fed-computation --timeout=180s || true")
+
+    print("\n FEM Client installation complete!")
+
+
 def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth_client_secrets):
     prev_dir = os.getcwd()
     try:
@@ -1096,7 +1154,7 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         database = "guacamole"
         adminUsername = "guacamole-admin"
         adminLocalPassword = generate_random_password(16)
-        
+
         with open(postgresql_values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
 
@@ -1199,6 +1257,8 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         else:
             print(f" PostgreSQL already installed, skipping...")
 
+        print(" Waiting for PostgreSQL pod to be ready (timeout: 300s)...")
+        cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n guacamole --timeout=300s || true")
         chart_dir = "helm-chart-guacamole"
         if not os.path.isdir(chart_dir):
             print(f" Cloning Guacamole Helm chart repository...")
@@ -1295,9 +1355,9 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
 
         # Create admin group and eucaim-user-creator user using guacli
         print(f" Creating Guacamole admin group and user-creator...")
-        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
+        cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
             create admin-group cloud-services-and-security-management", exit_on_error=False)
-        cmd(f"{guacli_path} --url \"http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
+        cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
             create admin-user eucaim-user-creator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
 
     finally:
@@ -1321,9 +1381,17 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         print(f" Warning: Template file not found: {template_file}")
         return
 
-    # Generate Guacamole admin password for eucaim-user-creator
-
-    print(f" Generated Guacamole admin password for eucaim-user-creator")
+    # Get the Guacamole admin password from the running container's ADMIN_PASSWORD env variable
+    print(f" Retrieving Guacamole admin password from container...")
+    guacamole_admin_password = cmd_output(
+        "minikube kubectl -- exec -n guacamole deploy/guacamole-guacamole -c guacamole "
+        "-- bash -c 'echo $ADMIN_PASSWORD' 2>/dev/null"
+    ).strip()
+    if not guacamole_admin_password:
+        print(f"  Warning: Could not retrieve ADMIN_PASSWORD from guacamole container, falling back to provided password")
+        guacamole_admin_password = guacamole_user_creator_password
+    else:
+        print(f" Guacamole admin password retrieved successfully (user: guacamole-admin)")
 
     # Get K8S service account token (we'll create a service account for this)
     print(f" Creating service account for user management jobs...")
@@ -1370,15 +1438,12 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         '__KEYCLOAK_CLIENT_SECRET__': auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET,
         '__GUACAMOLE_ENDPOINT__': 'http://guacamole-guacamole.guacamole.svc.cluster.local/guacamole/',
         '__GUACAMOLE_ADMIN_USER__': 'eucaim-user-creator',
+        #grabar la contraseña random en el values del operatos
         '__GUACAMOLE_ADMIN_PASSWORD__': guacamole_user_creator_password,
         '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
         '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
         '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',
-        '__K8S_ENDPOINT__': (
-            f'https://{cmd_output("minikube ip").strip()}:8443'
-            if RELEASE == "minikube" else
-            cmd_output("kubectl cluster-info 2>/dev/null | grep -oP 'https://[0-9.:]+' | head -1").strip() or "https://localhost:6443"
-        ),
+        '__K8S_ENDPOINT__': f'https://{cmd_output("minikube ip").strip()}:8443',
         '__K8S_TOKEN__': k8s_token,
     }
 
@@ -1461,7 +1526,7 @@ def apply_roles_and_bindings():
 
     print(f"\n RBAC roles and bindings applied successfully\n")
 
-def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
+def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guacamole_user_creator_password: str):
     '''Install DSWS Operator for managing dataset workspaces'''
     prev_dir = os.getcwd()
     try:
@@ -1509,25 +1574,9 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
         data['operatorConfiguration']['guacamole']['url'] = f"https://{CONFIG.public_domain}/guacamole/"
         print(f" Updated Guacamole URL to: {CONFIG.public_domain}")
 
-        # Get service-account-kubernetes-operator password from Keycloak realm
-        print(f" Reading Guacamole service account password from Keycloak realm...")
-        realm_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.private.json")
-        if os.path.exists(realm_file):
-            import json
-            with open(realm_file, 'r') as f:
-                realm_data = json.load(f)
-                # Find service-account-kubernetes-operator user
-                for user in realm_data.get('users', []):
-                    if user.get('username') == 'service-account-kubernetes-operator':
-                        # Get credentials
-                        for cred in user.get('credentials', []):
-                            if cred.get('type') == 'password':
-                                guac_password = cred.get('value')
-                                if guac_password:
-                                    data['operatorConfiguration']['guacamole']['password'] = guac_password
-                                    print(f"  Set Guacamole service account password from realm")
-                                    break
-                        break
+        # Use the eucaim-user-creator password (generated by install_guacamole) for the operator
+        data['operatorConfiguration']['guacamole']['password'] = guacamole_user_creator_password
+        print(f" Set Guacamole eucaim-user-creator password in operator configuration")
 
         # Save updated values
         with open(values_file, 'w') as f:
@@ -1548,73 +1597,6 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets):
 
     finally:
         os.chdir(prev_dir)
-
-def repair_kube_apiserver():
-    '''Attempt to recover a broken kube-apiserver by stopping/starting minikube.
-    This regenerates the kube-apiserver manifest from minikube defaults,
-    discarding any corrupt modifications.'''
-    if RELEASE != "minikube":
-        print(" Skipping kube-apiserver repair (not applicable for release=kubernetes)")
-        return True
-    print("\n" + "="*80)
-    print(" RECOVERING broken kube-apiserver")
-    print("="*80 + "\n")
-
-    print(" Performing minikube stop/start to regenerate manifest...")
-    print(" (This may take 1-2 minutes)")
-    cmd("minikube stop", exit_on_error=False)
-    time.sleep(5)
-    cmd("minikube start")
-
-    print(" Waiting for kube-apiserver to come back up...")
-    ok = wait_for_apiserver(max_wait=180, context="post-repair", _skip_repair=True)
-    if ok:
-        print(" kube-apiserver recovered successfully.")
-        print(" NOTE: OIDC / token-auth-file flags were stripped; re-run install to re-apply them.")
-    else:
-        print(" ERROR: kube-apiserver still not responding after repair attempt.")
-        print("   Try manually: minikube delete && minikube start")
-    return ok
-
-
-def wait_for_apiserver(max_wait: int = 120, context: str = "", _skip_repair: bool = False):
-    '''Wait until kube-apiserver is healthy and responding to kubectl'''
-    label = f" [{context}]" if context else ""
-    print(f" Waiting for kube-apiserver to be ready...{label}")
-    # Give kubelet a moment to notice the manifest change before polling
-    time.sleep(5)
-    waited = 0
-    while waited < max_wait:
-        result = subprocess.run(
-            KUBECTL.split() + ["get", "--raw=/healthz"],
-            capture_output=True, text=True
-        )
-        if result.returncode == 0 and "ok" in result.stdout.lower():
-            print(f" kube-apiserver is ready ({waited + 5}s elapsed){label}")
-            return True
-
-        # Check whether the apiserver container has actually crashed (minikube only)
-        if not _skip_repair and RELEASE == "minikube":
-            pod_check = subprocess.run(
-                ["minikube", "ssh", "--",
-                 "sudo crictl ps -a --name kube-apiserver 2>/dev/null | grep -v NAME"],
-                capture_output=True, text=True
-            )
-            pod_out = pod_check.stdout.strip()
-            # If the row shows Exited/Error/OOMKilled, the container crashed
-            if pod_out and any(s in pod_out for s in ["Exited", "Error", "OOM"]):
-                print(f"  kube-apiserver container is in a failed state: {pod_out.split(chr(10))[0]}")
-                print("  Attempting automatic recovery...")
-                return repair_kube_apiserver()
-
-        time.sleep(5)
-        waited += 5
-        if waited % 20 == 0:
-            print(f"   Still waiting for apiserver... ({waited + 5}s){label}")
-    print(f"  Warning: apiserver did not become ready within {max_wait}s{label}")
-    print(f"   Check manually: {KUBECTL} get --raw=/healthz")
-    return False
-
 
 def configure_kube_apiserver_oidc(CONFIG):
     '''Configure kube-apiserver with OIDC authentication for Kubeapps'''
@@ -1656,33 +1638,18 @@ def configure_kube_apiserver_oidc(CONFIG):
         token_patch_script = r"""#!/bin/bash
 set -e
 APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
-
 if grep -q 'token-auth-file' "$APISERVER_YAML"; then
     echo "--token-auth-file already present, skipping"
 else
     sed -i '/--tls-private-key-file/a\    - --token-auth-file=/etc/ca-certificates/token.csv' "$APISERVER_YAML"
     echo "--token-auth-file added"
 fi
-
-# Sanity-check the manifest (no PyYAML needed inside VM)
-if [ ! -s "$APISERVER_YAML" ]; then
-    echo "YAML_INVALID — file is empty"
-    exit 1
-fi
-if ! grep -q 'apiVersion:' "$APISERVER_YAML" || ! grep -q 'kube-apiserver' "$APISERVER_YAML"; then
-    echo "YAML_INVALID — missing required fields"
-    exit 1
-fi
-echo "YAML_VALID"
 """
         with open('/tmp/patch_token_auth.sh', 'w') as f:
             f.write(token_patch_script)
         cmd("minikube cp /tmp/patch_token_auth.sh minikube:/tmp/patch_token_auth.sh")
         cmd("minikube ssh -- 'sudo bash /tmp/patch_token_auth.sh'")
         print(" kube-apiserver patched with --token-auth-file")
-
-        # The manifest change triggers a kubelet restart; wait before checking OIDC.
-        wait_for_apiserver(max_wait=120, context="token-auth-file patch")
 
     # OIDC configuration flags
     oidc_flags = [
@@ -1719,48 +1686,32 @@ echo "YAML_VALID"
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
 TEMP_YAML="/tmp/kube-apiserver-temp.yaml"
-FINAL_YAML="/tmp/kube-apiserver-final.yaml"
 
 # Remove any existing OIDC flags first and save to temp file
-grep -v -- \x27--oidc-issuer-url\x27 "$APISERVER_YAML" | \\
-grep -v -- \x27--oidc-client-id\x27 | \\
-grep -v -- \x27--oidc-username-claim\x27 | \\
-grep -v -- \x27--oidc-username-prefix\x27 | \\
-grep -v -- \x27--oidc-groups-claim\x27 | \\
-grep -v -- \x27--oidc-groups-prefix\x27 > "$TEMP_YAML"
+grep -v -- '--oidc-issuer-url' "$APISERVER_YAML" | \\
+grep -v -- '--oidc-client-id' | \\
+grep -v -- '--oidc-username-claim' | \\
+grep -v -- '--oidc-username-prefix' | \\
+grep -v -- '--oidc-groups-claim' | \\
+grep -v -- '--oidc-groups-prefix' > "$TEMP_YAML"
 
-# Insert OIDC flags after --tls-private-key-file
-awk \'\n    {{
-        print $0
-        if ($0 ~ /--tls-private-key-file/) {{
-            print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
-            print "    - --oidc-client-id=kubernetes"
-            print "    - --oidc-username-claim=preferred_username"
-            print "    - \x27--oidc-username-prefix=oidc:\x27"
-            print "    - --oidc-groups-claim=groups"
-            print "    - \x27--oidc-groups-prefix=oidc:\x27"
-        }}
+# Find the line with --tls-private-key-file and insert OIDC flags after it
+awk '{{
+    print $0
+    if ($0 ~ /--tls-private-key-file/) {{
+        print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
+        print "    - --oidc-client-id=kubernetes"
+        print "    - --oidc-username-claim=preferred_username"
+        print "    - \\"--oidc-username-prefix=oidc:\\""
+        print "    - --oidc-groups-claim=groups"
+        print "    - \\"--oidc-groups-prefix=oidc:\\""
     }}
-\' "$TEMP_YAML" > "$FINAL_YAML"
+}}' "$TEMP_YAML" > "$APISERVER_YAML"
 
-# Sanity-check the result (no PyYAML needed inside VM)
-# Must be non-empty, contain apiVersion, and include the OIDC flag we just added
-if [ ! -s "$FINAL_YAML" ]; then
-    echo "YAML_INVALID after OIDC patch — file is empty"
-    exit 1
-fi
-if ! grep -q 'apiVersion:' "$FINAL_YAML" || ! grep -q 'kube-apiserver' "$FINAL_YAML"; then
-    echo "YAML_INVALID after OIDC patch — missing required fields"
-    exit 1
-fi
-if ! grep -q 'oidc-issuer-url' "$FINAL_YAML"; then
-    echo "YAML_INVALID after OIDC patch — oidc flags missing"
-    exit 1
-fi
-cp "$FINAL_YAML" "$APISERVER_YAML"
-echo "OIDC configuration applied and manifest validated OK"
+# Clean up
+rm -f "$TEMP_YAML"
 
-rm -f "$TEMP_YAML" "$FINAL_YAML"
+echo "OIDC configuration applied successfully"
 '''
 
     # Write script to temp file
@@ -1770,14 +1721,31 @@ rm -f "$TEMP_YAML" "$FINAL_YAML"
     # Copy script to minikube
     cmd("minikube cp /tmp/modify_apiserver.sh minikube:/tmp/modify_apiserver.sh")
 
-    # Run the script
+    # Run the script by piping it to bash (avoids permission issues with /tmp)
     print(" Modifying kube-apiserver.yaml...")
     cmd("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
 
     # Wait for apiserver to restart (it monitors the manifest file)
     print(" Waiting for kube-apiserver to restart with new configuration...")
     print("  (This may take 30-60 seconds)")
-    wait_for_apiserver(max_wait=120, context="OIDC patch")
+    time.sleep(10)
+
+    # Wait for apiserver to be ready
+    max_wait = 180
+    waited = 0
+    while waited < max_wait:
+        result = cmd("minikube kubectl -- get --raw=/healthz 2>/dev/null", exit_on_error=False)
+        if result == 0:
+            print(f" kube-apiserver is ready with OIDC configuration")
+            break
+        time.sleep(5)
+        waited += 5
+        if waited % 15 == 0:
+            print(f"   Still waiting for apiserver... ({waited}s)")
+
+    if waited >= max_wait:
+        print(f"  Warning: apiserver took longer than expected to restart")
+        print(f"   You may need to check manually with: kubectl get pods -n kube-system")
 
     # Verify OIDC configuration
     print("\n Verifying OIDC configuration...")
@@ -2212,55 +2180,22 @@ def install_api_gateway(CONFIG):
         return False
 
 
-def create_iptables_rules_script(use_gateway_api: bool = False):
+def create_iptables_rules_script():
     '''Create and apply iptables rules for external access to minikube ingress'''
     print("Setting up iptables rules for external access...")
 
-    # Determine which ingress controller to query based on the mode
-    if use_gateway_api:
-        svc_name = "traefik"
-        svc_namespace = "traefik"
-        http_port_name = "web"
-        https_port_name = "websecure"
-        controller_desc = "Traefik"
-    else:
-        svc_name = "ingress-nginx-controller"
-        svc_namespace = "ingress-nginx"
-        http_port_name = "http"
-        https_port_name = "https"
-        controller_desc = "ingress-nginx"
-
-    # Pre-wait: ensure the service actually exists before querying NodePorts
-    print(f"Waiting for {controller_desc} service '{svc_name}' in namespace '{svc_namespace}' to exist...")
-    svc_wait_retries = 20
-    for attempt in range(svc_wait_retries):
-        check = subprocess.run(
-            ["minikube", "kubectl", "--", "get", "svc", svc_name, "-n", svc_namespace],
-            capture_output=True, text=True
-        )
-        if check.returncode == 0:
-            print(f"  Service '{svc_name}' found.")
-            break
-        print(f"  Service not yet available (attempt {attempt + 1}/{svc_wait_retries}), waiting 5s...")
-        time.sleep(5)
-    else:
-        print(f"ERROR: Service '{svc_name}' in namespace '{svc_namespace}' did not appear after {svc_wait_retries} attempts.")
-        print(f"Please ensure {controller_desc} is installed and running:")
-        print(f"  minikube kubectl -- get svc -n {svc_namespace}")
-        sys.exit(1)
-
-    # Get service nodeports
+    # Get ingress-nginx service info to extract nodeports using kubectl
     http_nodeport = None
     https_nodeport = None
 
-    max_retries = 5
+    max_retries = 15
     retry_count = 0
 
     while retry_count < max_retries:
         try:
             result = subprocess.run(
-                ["minikube", "kubectl", "--", "get", "svc", svc_name, "-n", svc_namespace,
-                 "-o", f"jsonpath={{.spec.ports[?(@.name==\"{http_port_name}\")].nodePort}},{{.spec.ports[?(@.name==\"{https_port_name}\")].nodePort}}"],
+                ["minikube", "kubectl", "--", "get", "svc", "ingress-nginx-controller", "-n", "ingress-nginx",
+                 "-o", "jsonpath={.spec.ports[?(@.name==\"http\")].nodePort},{.spec.ports[?(@.name==\"https\")].nodePort}"],
                 capture_output=True, text=True, check=True
             )
             ports = result.stdout.strip().split(',')
@@ -2268,25 +2203,25 @@ def create_iptables_rules_script(use_gateway_api: bool = False):
             if len(ports) == 2 and ports[0] and ports[1]:
                 http_nodeport = ports[0]
                 https_nodeport = ports[1]
-                print(f"Detected NodePorts from {controller_desc} service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
+                print(f"Detected NodePorts from ingress-nginx service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
                 break
             else:
-                print(f"Warning: Could not parse nodeports from {controller_desc} (attempt {retry_count + 1}/{max_retries}), retrying...")
+                print(f"Warning: Could not parse nodeports (attempt {retry_count + 1}/{max_retries}), retrying...")
                 retry_count += 1
                 if retry_count < max_retries:
-                    time.sleep(5)
+                    time.sleep(10)
 
         except subprocess.CalledProcessError as e:
-            print(f"Warning: Could not get {controller_desc} service info (attempt {retry_count + 1}/{max_retries}): {e}")
+            print(f"Warning: Could not get ingress service info (attempt {retry_count + 1}/{max_retries}): {e}")
             retry_count += 1
             if retry_count < max_retries:
-                time.sleep(5)
+                time.sleep(10)
 
     if not http_nodeport or not https_nodeport:
-        print(f"ERROR: Could not detect NodePorts from {controller_desc} service after multiple attempts.")
-        print(f"Please ensure {controller_desc} is installed and running:")
-        print(f"  minikube kubectl -- get svc -n {svc_namespace}")
-        sys.exit(1)
+        print("Warning: Could not detect NodePorts from ingress-nginx service after multiple attempts.")
+        print("Skipping iptables rules setup. You can apply them manually later:")
+        print("  minikube kubectl -- get svc -n ingress-nginx")
+        return
 
     # Get minikube IP
     try:
@@ -3013,9 +2948,18 @@ def package_workstation_charts(CONFIG):
                 # Extract in destination directory
                 cmd("minikube ssh -- 'sudo tar -xzf /tmp/charts-packaged.tar.gz -C /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files/charts/'")
 
-                # Generate Helm repository index.yaml locally (helm not available inside minikube)
+                # Re-apply permissions after extraction (tar inside minikube creates root-owned files
+                # on the host-mounted path, which would otherwise block helm repo index)
+                cmd(f"sudo chmod -R 777 {host_charts_dir}")
+
+                # Generate Helm repository index.yaml locally (helm not available inside minikube).
+                # Must run with sudo because the charts dir is root-owned from the VM-side tar extraction;
+                # helm writes a temp file (index.yaml<random>) into the same directory before renaming it,
+                # so the process needs root write access regardless of the directory mode.
                 print(f"\n Generating Helm repository index...")
-                cmd(f"helm repo index {host_charts_dir} --url http://{CONFIG.public_domain}/dataset-service/output-files/charts/")
+                cmd(f"sudo $(which helm) repo index {host_charts_dir} --url http://{CONFIG.public_domain}/dataset-service/output-files/charts/")
+                # Make index.yaml world-readable so the dataset-service container can read it
+                cmd(f"sudo chmod 644 {host_charts_dir}/index.yaml")
 
                 # Clean up temporary files
                 cmd("minikube ssh -- 'sudo rm /tmp/charts-packaged.tar.gz'")
@@ -3270,7 +3214,7 @@ def apply_pod_priorities():
         file_path = os.path.join(priorities_dir, priority_file)
         if os.path.exists(file_path):
             print(f" Applying {priority_file}...")
-            cmd(f"minikube kubectl -- apply --validate=false -f {file_path}")
+            cmd(f"minikube kubectl -- apply -f {file_path}")
         else:
             print(f"  Warning: {priority_file} not found, skipping")
 
@@ -3278,7 +3222,7 @@ def apply_pod_priorities():
 
 
 def install_orthanc(CONFIG):
-    '''Install Orthanc PACS server - uses its own orthanc namespace'''
+    '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
     print(f"\n{'='*80}")
     print(" Installing Orthanc PACS Server")
     print(f"{'='*80}\n")
@@ -3292,55 +3236,61 @@ def install_orthanc(CONFIG):
         print(" Creating orthanc namespace...")
         cmd("minikube kubectl -- create namespace orthanc --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
-        # Create Orthanc data directories on the host
-        print(" Creating Orthanc data directories...")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/db'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/dicom'")
-        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
+        # Orthanc now uses dataset-service namespace (no separate namespace needed)
+        print(" Using dataset-service namespace to share PVC...")
 
-        # Clean up any stale resources from old namespaces
-        print(" Cleaning up any stale Orthanc resources...")
-        for ns in ["orthanc-ohif", "dataset-service"]:
-            cmd(f"minikube kubectl -- delete deployment orthanc -n {ns} --ignore-not-found=true")
-            cmd(f"minikube kubectl -- delete replicaset -n {ns} -l app=orthanc --ignore-not-found=true")
-            cmd(f"minikube kubectl -- delete pod -n {ns} -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
+        # Create Orthanc directories in the shared datalake volume
+        print(" Creating Orthanc directories in shared datalake-data PVC...")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/db'")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
+
+        # Clean up OLD orthanc-ohif namespace (previous installation used separate NS + orthanc-storage-pvc)
+        print(" Removing old orthanc-ohif namespace resources...")
+        cmd("minikube kubectl -- delete deployment orthanc -n orthanc-ohif --ignore-not-found=true")
+        cmd("minikube kubectl -- delete replicaset -n orthanc-ohif -l app=orthanc --ignore-not-found=true")
+        cmd("minikube kubectl -- delete pod -n orthanc-ohif -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
         cmd("minikube kubectl -- delete namespace orthanc-ohif --ignore-not-found=true")
+
+        # Clean up current namespace deployment to clear any stale PVC references
+        print(" Removing any stale Orthanc deployment in dataset-service...")
+        cmd("minikube kubectl -- delete deployment orthanc -n dataset-service --ignore-not-found=true")
+        cmd("minikube kubectl -- delete replicaset -n dataset-service -l app=orthanc --ignore-not-found=true")
+        cmd("minikube kubectl -- delete pod -n dataset-service -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
         cmd("sleep 3")
 
         # Apply ConfigMap
         if os.path.exists("orthanc-cm.yaml"):
-            cmd("minikube kubectl -- apply -n orthanc -f orthanc-cm.yaml")
+            cmd("minikube kubectl -- apply -f orthanc-cm.yaml")
 
-        # Apply Deployment
+        # Apply Deployment (uses datalake-data PVC in dataset-service namespace)
         if os.path.exists("orthanc-deploy.yaml"):
-            cmd("minikube kubectl -- apply -n orthanc -f orthanc-deploy.yaml")
-
-        # Apply PVC if present
-        if os.path.exists("orthanc-pvc.yaml"):
-            cmd("minikube kubectl -- apply -n orthanc -f orthanc-pvc.yaml")
+            cmd("minikube kubectl -- apply -f orthanc-deploy.yaml")
 
         # Handle Ingress/HTTPRoute based on configuration
-        use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
 
         if use_gateway_api:
+            # Use HTTPRoute (Gateway API)
             httproute_file = "orthanc-httproute.yaml"
             if os.path.exists(httproute_file):
                 update_ingress_host(httproute_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -n orthanc -f {httproute_file}")
+                cmd(f"minikube kubectl -- apply -f {httproute_file}")
                 print(f" Applied HTTPRoute for Orthanc with domain: {CONFIG.public_domain}")
             else:
                 print(f"  Warning: {httproute_file} not found")
         else:
+            # LEGACY: Use traditional Ingress
             ingress_file = "orthanc-ingress.yaml"
             if os.path.exists(ingress_file):
                 update_ingress_host(ingress_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -n orthanc -f {ingress_file}")
+                cmd(f"minikube kubectl -- apply -f {ingress_file}")
                 print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
             else:
                 print(f"  Warning: {ingress_file} not found")
 
         print(f" Orthanc installation completed")
-        print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc")
+        print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
 
     finally:
         os.chdir(prev_dir)
@@ -3368,10 +3318,6 @@ def install(flavor):
     print(f" Configuration loaded from: {DEFAULT_CONFIG_FILE_PATH}")
     print(f" Domain: {CONFIG.public_domain}")
 
-    # Ensure kube-apiserver is up and responding before doing any kubectl work.
-    # A previous partial run may have patched the manifest and left it mid-restart.
-    wait_for_apiserver(max_wait=300, context="pre-install")
-
     # Check if Gateway API should be used (default: False for backward compatibility)
     use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
 
@@ -3392,22 +3338,8 @@ def install(flavor):
     # Apply RBAC roles and bindings
     apply_roles_and_bindings()
 
-    # Configure kube-apiserver with OIDC and iptables rules — minikube only
-    if RELEASE == "minikube":
-        print(f"\n{'='*80}")
-        print(" Configuring kube-apiserver with OIDC")
-        print(f"{'='*80}\n")
-        configure_kube_apiserver_oidc(CONFIG)
-
-        # Safety-net: ensure apiserver is fully responding before any kubectl calls.
-        # Both the token-auth-file patch and the OIDC patch can trigger restarts;
-        # the early-return path (already configured) may not wait long enough.
-        wait_for_apiserver(max_wait=180, context="post-apiserver-config")
-
-        # Create iptables rules for external access
-        create_iptables_rules_script(use_gateway_api=use_gateway_api)
-    else:
-        print(" Skipping kube-apiserver OIDC config and iptables rules (release=kubernetes)")
+    # Create iptables rules for external access
+    create_iptables_rules_script()
 
     # Install cert-manager (needed for TLS certificates)
     cert_manager_available = install_cert_manager(CONFIG)
@@ -3457,6 +3389,9 @@ def install(flavor):
     # Keycloak is installed in all flavors
     install_keycloak(auth_client_secrets)
 
+    # Configure kube-apiserver with OIDC - done AFTER Keycloak so the OIDC issuer URL is reachable
+    configure_kube_apiserver_oidc(CONFIG)
+
     # Dataset service is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
         install_dataset_service(auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
@@ -3488,7 +3423,7 @@ def install(flavor):
 
     # DSWS Operator is installed in micro, mini and standard flavors (requires dataset-service and guacamole)
     if flavor in ["micro", "mini", "standard"]:
-        install_dsws_operator(CONFIG, auth_client_secrets)
+        install_dsws_operator(CONFIG, auth_client_secrets, guacamole_user_creator_password)
 
     # Apply RBAC roles and bindings for OIDC groups
     apply_roles_and_bindings()
@@ -3500,6 +3435,10 @@ def install(flavor):
     # Job manager service (micro, mini and standard)
     if flavor in ["micro", "mini", "standard"]:
         install_jobman_service(CONFIG, auth_client_secrets)
+
+    # FEM Client (mini and standard)
+    if flavor in ["mini", "standard"]:
+        install_fem_client(CONFIG, auth_client_secrets)
 
     # Post-installation tasks
     print(f"\n{'='*80}")
@@ -3537,20 +3476,7 @@ def install(flavor):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument("FLAVOR", help="Which flavor to install (micro, mini, standard)", nargs="?", default="")
-    parser.add_argument("--repair-apiserver", action="store_true",
-                        help="Attempt to recover a broken kube-apiserver and exit")
-    parser.add_argument("--release", choices=["minikube", "kubernetes"], default="minikube",
-                        help="Kubernetes release type: 'minikube' (default) or 'kubernetes'")
     args = parser.parse_args()
-
-    RELEASE = args.release
-    KUBECTL = "minikube kubectl --" if RELEASE == "minikube" else "kubectl"
-    print(f" Release mode: {RELEASE}  (kubectl command: '{KUBECTL}')")
-
-    if args.repair_apiserver:
-        CONFIG = load_config(logging.root, DEFAULT_CONFIG_FILE_PATH)
-        ok = repair_kube_apiserver()
-        exit(0 if ok else 1)
 
     flavor = str(args.FLAVOR).lower()
     while flavor not in FLAVORS:
