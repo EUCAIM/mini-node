@@ -692,6 +692,21 @@ def create_dataset_service_pvcs():
     # Ensure namespace exists
     cmd("minikube kubectl -- create namespace dataset-service || true")
 
+    # Ensure all required host directories exist on the minikube VM before applying PVCs.
+    # The hostpath provisioner requires the directories to already exist or the pod will
+    # fail with "no such file or directory" (CreateContainerConfigError).
+    print("  Creating required host directories on minikube VM...")
+    dirs = [
+        "/var/hostpath-provisioner/dataset-service/postgres-data",
+        "/var/hostpath-provisioner/dataset-service/dataset-service-data",
+        "/var/hostpath-provisioner/dataset-service/datalake",
+        "/var/hostpath-provisioner/dataset-service/datasets",
+    ]
+    for d in dirs:
+        cmd(f"minikube ssh -- 'sudo mkdir -p {d}'")
+    cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/'")
+    print("  Host directories created.")
+
     if not os.path.exists(pvcs_path):
         print(f" Warning: PV manifest not found: {pvcs_path}")
         return False
@@ -3496,3 +3511,4 @@ if __name__ == '__main__':
     install(flavor)
 
     exit(0)
+
