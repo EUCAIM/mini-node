@@ -27,13 +27,29 @@ The installation script (`install.py`) automates the deployment of:
 
 The following tools must be installed before running the installation:
 
-1. **Minikube** *(only for development/single-node setup — skip if using a production Kubernetes cluster)*
+1. **Python 3** with dependencies
+   ```bash
+   sudo apt-get install python3 python3-pip python3-yaml
+   ```
+
+2. **Git** (version control)
+   ```bash
+   sudo apt-get install git
+   ```
+
+3. **Docker** (container runtime)
+   ```bash
+   curl -fsSL https://get.docker.com -o get-docker.sh
+   sudo sh get-docker.sh
+   ```
+
+4. **Minikube** *(only for development/single-node setup — skip if using a production Kubernetes cluster)*
    ```bash
    curl -LO https://storage.googleapis.com/minikube/releases/latest/minikube-linux-amd64
    sudo install minikube-linux-amd64 /usr/local/bin/minikube
    ```
 
-   For production Kubernetes, ensure **`kubectl`** is installed and your kubeconfig is configured to point to the target cluster:
+5. For production Kubernetes, ensure **`kubectl`** is installed and your kubeconfig is configured to point to the target cluster:
    ```bash
    # Example: install kubectl
    curl -LO "https://dl.k8s.io/release/$(curl -sL https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
@@ -42,44 +58,20 @@ The following tools must be installed before running the installation:
    kubectl cluster-info
    ```
 
-2. **Helm** (Kubernetes package manager)
-
-   #### Ubuntu:
+6. **Helm** (Kubernetes package manager)
    ```bash
    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
    ```
 
-   #### Windows:
-   1. Download the Helm binary from the [Helm Releases Page](https://github.com/helm/helm/releases).
-   2. Extract the binary and add it to your system's PATH.
-   3. Verify the installation by running:
-      ```bash
-      helm version
-      ```
+### Required Repositories
 
+Some repositories must be cloned manually before running the installation:
 
-3. **Docker** (container runtime)
+- **This one**
    ```bash
-   curl -fsSL https://get.docker.com -o get-docker.sh
-   sudo sh get-docker.sh
+   git clone https://github.com/EUCAIM/mini-node.git
+   cd mini-node
    ```
-
-4. **Git** (version control)
-   ```bash
-   sudo apt-get install git
-   ```
-
-5. **Python 3** with dependencies
-   ```bash
-   sudo apt-get install python3 python3-pip python3-yaml
-   ```
-
-
-## External Dependencies
-
-### Required Repositories (Manual Setup)
-
-These must be cloned manually before running the installation:
 
 - **k8s-deploy-node** — all Helm charts and Kubernetes manifests
   ```bash
@@ -99,17 +91,25 @@ These must be cloned manually before running the installation:
   ```
 
 
-## Configuration Files
-
-### Required Files
+### Required Configuration Files
 
 1. **config.private.yaml** - Main configuration file
    - Template: `config.yaml`
    - Contains: domain, passwords, database settings, OIDC configuration, etc.
+   
+   The first time you must create your own private copy from the template  
+   and adjust the values in your copy according to your deployment case using your favorite editor:
+   ```
+   cp config.yaml config.private.yaml
+   nano config.private.yaml
+   ```
 
 2. **eucaim-node-realm.private.json** - Keycloak realm configuration
    - Template: `eucaim-node-realm.json`
    - Contains: client secrets, realm settings, identity providers
+   
+   You don't need to create this one, it is automatically created by the script the first time with random client secrets
+   and later, when upgrading, it will be read to keep the same secrets.
 
 
 ## Installation Steps
@@ -132,34 +132,16 @@ In `--release kubernetes` mode the following minikube-specific steps are **skipp
 ### Option A — Minikube (development / single-node)
 
 1. **Prepare the environment**
-   ```bash
-   # Clone this repository
-   git clone <this-repo-url>
-   cd <repo-directory>
+   - Ensure all required software has been installed *(see [Required Software](#required-software) above)*.
+   - Ensure all required repositories has been downloaded *(see [Required Repositories](#required-repositories) above)*.
+   - Prepare your private copy of the configuration file *(see [Required Configuration Files](#required-configuration-files) above)*.
 
-   # Clone k8s-deploy-node (mininode branch)
-   git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
-   cd k8s-deploy-node
-   git clone --depth 1 --branch v2.2.5 https://github.com/EUCAIM/jobman.git
-   git clone https://github.com/EUCAIM/dataset-explorer.git
-   cd ..
-   ```
-
-2. **Create configuration files** *(see [Configuration Templates](#configuration-templates) above for the full structure)*
-   ```bash
-   cp config.yaml config.private.yaml
-   nano config.private.yaml
-
-   cp eucaim-node-realm.json eucaim-node-realm.private.json
-   nano eucaim-node-realm.private.json
-   ```
-
-3. **Start Minikube** with the host data folder mounted
+2. **Start Minikube** with the host data folder mounted
    ```bash
    minikube start --mount --mount-string="/home/ubuntu/<host-data-path>:/var/hostpath-provisioner"
    ```
 
-4. **Run the installation**
+3. **Run the installation**
    ```bash
    python3 install.py <flavor>              # flavor: micro | mini | standard
    # or explicitly:
@@ -170,33 +152,13 @@ In `--release kubernetes` mode the following minikube-specific steps are **skipp
 
 ### Option B — Production Kubernetes cluster
 
-1. **Prepare the environment** *(same as Minikube — clone repos and config files)*
-   ```bash
-   git clone <this-repo-url>
-   cd <repo-directory>
-
-   git clone --branch mininode https://github.com/EUCAIM/k8s-deploy-node.git
-   cd k8s-deploy-node
-   git clone --depth 1 --branch v2.2.5 https://github.com/EUCAIM/jobman.git
-   git clone https://github.com/EUCAIM/dataset-explorer.git
-   cd ..
-   ```
-
-2. **Create configuration files** *(see [Configuration Templates](#configuration-templates) above for the full structure)*
-   ```bash
-   cp config.yaml config.private.yaml
-   nano config.private.yaml
-
-   cp eucaim-node-realm.json eucaim-node-realm.private.json
-   nano eucaim-node-realm.private.json
-   ```
-
-3. **Ensure `kubectl` is configured** for the target cluster
-   ```bash
-   kubectl cluster-info   # must respond before running install
-   ```
-
-4. **Run the installation**
+1. **Prepare the environment**
+   - Ensure all required software has been installed *(see [Required Software](#required-software) above)*.
+     Ensure `kubectl` is configured for the target cluster: `kubectl cluster-info`
+   - Ensure all required repositories has been downloaded *(see [Required Repositories](#required-repositories) above)*.
+   - Prepare your private copy of the configuration file *(see [Required Configuration Files](#required-configuration-files) above)*.
+   
+2. **Run the installation**
    ```bash
    python3 install.py <flavor> --release kubernetes
    ```
