@@ -967,23 +967,53 @@ def install_dataset_explorer(CONFIG):
 
             domain = CONFIG.public_domain
 
-            # Detect the old node domain from the file itself (first https:// URL that
-            # is NOT a well-known external host like github.com, zenodo.org, etc.)
+            # Detect ALL old node domains from the file (any https:// URL that is NOT
+            # a well-known external host and NOT the target domain).
             external_hosts = {'github.com', 'zenodo.org', 'www.zenodo.org'}
-            old_domain = None
+            old_domains = []
             for m in re.finditer(r'https?://([a-zA-Z0-9._-]+)', raw):
                 host = m.group(1)
-                if host not in external_hosts and host != domain:
-                    old_domain = host
-                    break
+                if host not in external_hosts and host != domain and host not in old_domains:
+                    old_domains.append(host)
 
-            if old_domain:
-                print(f" Replacing old domain '{old_domain}' → '{domain}' in {config_file}")
-                raw = raw.replace(old_domain, domain)
+            if old_domains:
+                for old_domain in old_domains:
+                    print(f" Replacing old domain '{old_domain}' → '{domain}' in {config_file}")
+                    raw = raw.replace(old_domain, domain)
             else:
                 print(f" No old domain detected in {config_file}, skipping domain replacement")
 
+            # Replace any localhost references with the configured domain
+            if 'localhost' in raw:
+                print(f" Replacing 'localhost' → '{domain}' in {config_file}")
+                raw = re.sub(r'localhost(?::\d+)?', domain, raw)
+
             config_data = json.loads(raw)
+
+            # Always enforce correct realm and project name
+            if "keycloak" in config_data and "config" in config_data["keycloak"]:
+                old_realm = config_data["keycloak"]["config"].get("realm", "")
+                config_data["keycloak"]["config"]["realm"] = "EUCAIM-NODE"
+                if old_realm != "EUCAIM-NODE":
+                    print(f" Fixed keycloak realm: '{old_realm}' → 'EUCAIM-NODE'")
+
+            if "project" in config_data:
+                old_name = config_data["project"].get("name", "")
+                config_data["project"]["name"] = "EUCAIM-NODE"
+                if old_name != "EUCAIM-NODE":
+                    print(f" Fixed project name: '{old_name}' → 'EUCAIM-NODE'")
+
+            # Replace any qpinsights link/icon with orthanc in externalServices
+            if "externalServices" in config_data:
+                for service in config_data["externalServices"]:
+                    if "qpinsights" in service.get("link", "").lower():
+                        old_link = service["link"]
+                        service["link"] = re.sub(r'(https?://[^/]+)/qpinsights[^\s"]*', rf'\1/orthanc', old_link)
+                        print(f" Fixed externalService link: '{old_link}' → '{service['link']}'")
+                    if "quibim" in service.get("icon", "").lower():
+                        old_icon = service["icon"]
+                        service["icon"] = "/icons/orthanc.png"
+                        print(f" Fixed externalService icon: '{old_icon}' → '/icons/orthanc.png'")
 
             # Write updated config back to config-mini-node.json
             with open(config_file, 'w') as f:
@@ -3511,4 +3541,3 @@ if __name__ == '__main__':
     install(flavor)
 
     exit(0)
-
