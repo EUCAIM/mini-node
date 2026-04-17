@@ -1200,7 +1200,7 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         password = generate_random_password(16)
         database = "guacamole"
         adminUsername = "guacamole-admin"
-        adminLocalPassword = generate_random_password(16)
+        adminLocalPassword = guacamole_user_creator_password
 
         with open(postgresql_values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
@@ -1396,8 +1396,9 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
                 guacli_path = local_bin_path
                 print(f" Using guacli from: {guacli_path}")
 
-        # Wait for Guacamole to be ready
-        print(f"\n Waiting for Guacamole to be ready...")
+
+        print(f"\n Waiting for Guacamole pod to be ready...")
+        cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=guacamole -n guacamole --timeout=300s || true")
         cmd("sleep 15")
 
         # Create admin group and eucaim-user-creator user using guacli
@@ -1406,6 +1407,8 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
             create admin-group cloud-services-and-security-management", exit_on_error=False)
         cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
             create admin-user eucaim-user-creator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
+        cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
+            create admin-user service-account-kubernetes-operator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
 
     finally:
         os.chdir(prev_dir)
@@ -3283,6 +3286,17 @@ def install_orthanc(CONFIG):
         print(" Creating orthanc namespace...")
         cmd("minikube kubectl -- create namespace orthanc --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
+        # Create patient-id-encryption-key secret
+        encryption_key = getattr(getattr(CONFIG, 'orthanc', None), 'patient_id_encryption_key', '')
+        if encryption_key:
+            cmd(f"minikube kubectl -- create secret generic patient-id-encryption-key"
+                f" --from-literal=patient-id-encryption-key={encryption_key}"
+                f" --namespace=orthanc"
+                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -")
+            print(" Created patient-id-encryption-key secret in orthanc namespace")
+        else:
+            print("  Warning: orthanc.patient_id_encryption_key not set in config, skipping secret creation")
+
         # Orthanc now uses dataset-service namespace (no separate namespace needed)
         print(" Using dataset-service namespace to share PVC...")
 
@@ -3291,8 +3305,11 @@ def install_orthanc(CONFIG):
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/db'")
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
-
-
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/scripts'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/scripts'")
+        scripts_src = os.path.join(orthanc_dir, "scripts")
+        if os.path.exists(scripts_src):
+            cmd(f"minikube cp {scripts_src}/script.lua minikube:/var/hostpath-provisioner/dataset-service/datalake/scripts/")
         # Apply PVC for Orthanc (PV uses the shared datalake hostPath, no extra dir needed)
         if os.path.exists("orthanc-pvc.yaml"):
             print(" Applying Orthanc PV and PVC...")
