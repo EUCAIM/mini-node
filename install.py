@@ -401,7 +401,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
 
-    # Auto-copy realm template if missing
+# Auto-copy realm template if missing
     if not os.path.exists(realm_config_file):
         source_realm = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak", "eucaim-node-realm.json")
         if os.path.exists(source_realm):
@@ -410,7 +410,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
             shutil.copy(source_realm, realm_config_file)
         else:
             raise FileNotFoundError(f"Realm template not found: {source_realm}")
-    realm_config_file_private_path = os.path.join(SCRIPT_DIR, realm_config_file_private)
+    realm_config_file_private_path = os.path.join(os.getcwd(), realm_config_file_private)
     with open(realm_config_file, "rt") as fin:
         with open(realm_config_file_private_path, "wt") as fout:
             for line in fin:
@@ -1004,11 +1004,13 @@ def install_dataset_explorer(CONFIG):
                     print(f" Fixed project name: '{old_name}' → 'EUCAIM-NODE'")
 
             # Replace any qpinsights link/icon with orthanc in externalServices
+            # APLICAR PVC Y quitar el NAMESPACE ORTHANC-OHIF
+            # 
             if "externalServices" in config_data:
                 for service in config_data["externalServices"]:
                     if "qpinsights" in service.get("link", "").lower():
                         old_link = service["link"]
-                        service["link"] = re.sub(r'(https?://[^/]+)/qpinsights[^\s"]*', rf'\1/orthanc', old_link)
+                        service["link"] = re.sub(r'(https?://[^/]+)/qpinsights[^\s"]*', rf'\1/orthanc/ui/app/index.html#/', old_link)
                         print(f" Fixed externalService link: '{old_link}' → '{service['link']}'")
                     if "quibim" in service.get("icon", "").lower():
                         old_icon = service["icon"]
@@ -1623,10 +1625,6 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         data['operatorConfiguration']['guacamole']['password'] = guacamole_user_creator_password
         print(f" Set Guacamole eucaim-user-creator password in operator configuration")
 
-        if 'k8s' not in data['operatorConfiguration']:
-            data['operatorConfiguration']['k8s'] = {}
-        data['operatorConfiguration']['k8s']['node_selection'] = False
-
         # Save updated values
         with open(values_file, 'w') as f:
             yaml.dump(data, f, default_flow_style=False, sort_keys=False, indent=2)
@@ -1641,7 +1639,7 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         # Install or upgrade DSWS Operator
         print(f"\n Checking if DSWS Operator is already installed...")
         cmd(f"helm upgrade --install dsws-operator chaimeleon-services/chaimeleon-operator "
-            f"--version 1.3.2 --namespace dsws-operator -f {values_file}")
+            f"--version 1.3.1 --namespace dsws-operator -f {values_file}")
         print(f" DSWS Operator installed/upgraded successfully")
 
     finally:
@@ -3294,12 +3292,11 @@ def install_orthanc(CONFIG):
         cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
 
-        # Clean up OLD orthanc-ohif namespace (previous installation used separate NS + orthanc-storage-pvc)
-        print(" Removing old orthanc-ohif namespace resources...")
-        cmd("minikube kubectl -- delete deployment orthanc -n orthanc-ohif --ignore-not-found=true")
-        cmd("minikube kubectl -- delete replicaset -n orthanc-ohif -l app=orthanc --ignore-not-found=true")
-        cmd("minikube kubectl -- delete pod -n orthanc-ohif -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
-        cmd("minikube kubectl -- delete namespace orthanc-ohif --ignore-not-found=true")
+
+        # Apply PVC for Orthanc (PV uses the shared datalake hostPath, no extra dir needed)
+        if os.path.exists("orthanc-pvc.yaml"):
+            print(" Applying Orthanc PV and PVC...")
+            cmd("minikube kubectl -- apply -f orthanc-pvc.yaml")
 
         # Clean up current namespace deployment to clear any stale PVC references
         print(" Removing any stale Orthanc deployment in dataset-service...")
