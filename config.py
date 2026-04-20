@@ -53,6 +53,11 @@ class Config:
         if 'focus' in cfg:
             self.focus = Config.Focus(cfg['focus'])
 
+        # Optional: Orthanc configuration
+        if 'orthanc' in cfg:
+            self.orthanc = Config.Orthanc(cfg['orthanc'])
+
+
     class Postgres:
         def __init__(self, pg: dict):
             required = ['db_password', 'username', 'database']
