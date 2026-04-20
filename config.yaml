@@ -44,6 +44,10 @@ oidc:
   username_claim_type: "preferred_username"
   groups_claim_type: "groups"
 
+orthanc:
+  patient_id_encryption_key: "your_secret_encryption_key_here"
+    # Key used to encrypt patient IDs in Orthanc via the Lua script
+
 letsencrypt:
   email: "admin@i3m.upv.es"
   use_staging: false
