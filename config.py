@@ -119,7 +119,11 @@ class Config:
             self.redirect_uri = od['redirect_uri']
             self.username_claim_type = od['username_claim_type']
             self.groups_claim_type = od['groups_claim_type']
-
+            
+    class Orthanc:
+        def __init__(self, oc: dict):
+            self.patient_id_encryption_key = oc.get('patient_id_encryption_key', '')
+            
     class LetsEncrypt:
         def __init__(self, le: dict):
             required = ['email']
