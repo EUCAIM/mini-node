@@ -44,8 +44,20 @@ def generate_random_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choice(alphabet) for _ in range(length))
 
-## Generate guacamole admin password globally (after function definition)
-guacamole_user_creator_password = generate_random_password(24)
+## Load or generate guacamole admin password (persisted across runs so reinstalls don't break the DB)
+_guac_pw_file = os.path.join(SCRIPT_DIR, "guacamole-eucaim-user-creator-password.txt")
+_guac_pw_loaded = None
+if os.path.exists(_guac_pw_file):
+    with open(_guac_pw_file) as _f:
+        for _line in _f:
+            if _line.startswith("Password:"):
+                _guac_pw_loaded = _line.split(":", 1)[1].strip()
+                break
+if _guac_pw_loaded:
+    guacamole_user_creator_password = _guac_pw_loaded
+    print(f"Reusing existing guacamole-eucaim-user-creator password from {_guac_pw_file}")
+else:
+    guacamole_user_creator_password = generate_random_password(24)
 
 
 ## Update YAML files
@@ -1197,7 +1209,19 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         postgresql_values_file = "postgresql-values.yaml"
         postgresql_private_values_file = "postgresql-values.private.yaml"
         username = "guacamole"
-        password = generate_random_password(16)
+        # Reuse existing password from private values file to avoid breaking an already-running DB
+        password = None
+        if os.path.exists(postgresql_private_values_file):
+            try:
+                with open(postgresql_private_values_file) as _pf:
+                    _existing_pg = yaml.safe_load(_pf) or {}
+                password = _existing_pg.get('auth', {}).get('password') or None
+                if password:
+                    print(" Reusing existing PostgreSQL password for Guacamole from private values file")
+            except Exception:
+                password = None
+        if not password:
+            password = generate_random_password(16)
         database = "guacamole"
         adminUsername = "guacamole-admin"
         adminLocalPassword = guacamole_user_creator_password
@@ -1306,6 +1330,39 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
 
         print(" Waiting for PostgreSQL pod to be ready (timeout: 300s)...")
         cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n guacamole --timeout=300s || true")
+
+        # Verify the guacamole DB user password matches. If not, the PVC has stale data
+        # from a previous install — wipe it and reinitialize PostgreSQL.
+        print(" Verifying PostgreSQL credentials...")
+        pg_auth_check = cmd_output(
+            f"minikube kubectl -- exec -n guacamole postgresql-0 --"
+            f" env PGPASSWORD={password} psql -U guacamole -d guacamole -c '\\q' 2>&1"
+        )
+        if "password authentication failed" in pg_auth_check or "FATAL" in pg_auth_check:
+            print("  PostgreSQL password mismatch detected (stale PVC data). Wiping data directory...")
+
+            # Find the actual hostpath for the guacamole PVC
+            pv_path = cmd_output(
+                "minikube kubectl -- get pv -o json | python3 -c \""
+                "import json,sys; pvs=json.load(sys.stdin);"
+                " [print(p['spec'].get('hostPath',{}).get('path','')) for p in pvs['items']"
+                " if p['spec'].get('claimRef',{}).get('namespace')=='guacamole']\""
+            ).strip().split('\n')[0].strip()
+
+            if pv_path:
+                print(f"  Wiping PV data at: {pv_path}")
+                cmd("minikube kubectl -- scale deploy/guacamole-guacamole -n guacamole --replicas=0", exit_on_error=False)
+                cmd("minikube kubectl -- scale statefulset/postgresql -n guacamole --replicas=0")
+                cmd("sleep 10")
+                cmd(f"minikube ssh -- 'sudo rm -rf {pv_path}'")
+                cmd("minikube kubectl -- scale statefulset/postgresql -n guacamole --replicas=1")
+                cmd("minikube kubectl -- wait --for=condition=ready pod/postgresql-0 -n guacamole --timeout=120s")
+                print(" PostgreSQL reinitialized with correct credentials")
+            else:
+                print("  Warning: Could not determine PV hostpath, skipping wipe")
+        else:
+            print(" PostgreSQL credentials verified OK")
+
         chart_dir = "helm-chart-guacamole"
         if not os.path.isdir(chart_dir):
             print(f" Cloning Guacamole Helm chart repository...")
@@ -1398,8 +1455,20 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
 
 
         print(f"\n Waiting for Guacamole pod to be ready...")
-        cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=guacamole -n guacamole --timeout=300s || true")
-        cmd("sleep 15")
+        # Poll until at least one guacamole pod exists, then wait for ready
+        guac_ready = False
+        for _attempt in range(30):
+            _pod = cmd_output(
+                "minikube kubectl -- get pods -n guacamole --no-headers 2>/dev/null"
+                " | grep guacamole-guacamole | grep Running | head -1"
+            ).strip()
+            if _pod:
+                guac_ready = True
+                break
+            time.sleep(10)
+        if not guac_ready:
+            print("  Warning: Guacamole pod did not reach Running state in time")
+        cmd("sleep 30")
 
         # Create admin group and eucaim-user-creator user using guacli
         print(f" Creating Guacamole admin group and user-creator...")
@@ -3286,14 +3355,20 @@ def install_orthanc(CONFIG):
         print(" Creating orthanc namespace...")
         cmd("minikube kubectl -- create namespace orthanc --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
-        # Create patient-id-encryption-key secret
+        # Create patient-id-encryption-key secret (only if it doesn't already exist)
         encryption_key = getattr(getattr(CONFIG, 'orthanc', None), 'patient_id_encryption_key', '')
         if encryption_key:
-            cmd(f"minikube kubectl -- create secret generic patient-id-encryption-key"
-                f" --from-literal=patient-id-encryption-key={encryption_key}"
-                f" --namespace=orthanc"
-                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -")
-            print(" Created patient-id-encryption-key secret in orthanc namespace")
+            existing_secret = cmd_output(
+                "minikube kubectl -- get secret patient-id-encryption-key -n orthanc"
+                " --ignore-not-found -o jsonpath='{.metadata.name}'"
+            ).strip()
+            if existing_secret == 'patient-id-encryption-key':
+                print(" Secret 'patient-id-encryption-key' already exists, skipping (delete manually to recreate)")
+            else:
+                cmd(f"minikube kubectl -- create secret generic patient-id-encryption-key"
+                    f" --from-literal=patient-id-encryption-key={encryption_key}"
+                    f" --namespace=orthanc")
+                print(" Created patient-id-encryption-key secret in orthanc namespace")
         else:
             print("  Warning: orthanc.patient_id_encryption_key not set in config, skipping secret creation")
 
