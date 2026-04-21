@@ -57,6 +57,9 @@ class Config:
         if 'orthanc' in cfg:
             self.orthanc = Config.Orthanc(cfg['orthanc'])
 
+        # Optional: Guacamole PostgreSQL configuration
+        if 'guacamole' in cfg:
+            self.guacamole = Config.Guacamole(cfg['guacamole'])
 
     class Postgres:
         def __init__(self, pg: dict):
@@ -119,11 +122,7 @@ class Config:
             self.redirect_uri = od['redirect_uri']
             self.username_claim_type = od['username_claim_type']
             self.groups_claim_type = od['groups_claim_type']
-            
-    class Orthanc:
-        def __init__(self, oc: dict):
-            self.patient_id_encryption_key = oc.get('patient_id_encryption_key', '')
-            
+
     class LetsEncrypt:
         def __init__(self, le: dict):
             required = ['email']
@@ -138,6 +137,12 @@ class Config:
         def __init__(self, tr: dict):
             self.url = tr.get('url', '')  # URL is optional
 
+    class Orthanc:
+        def __init__(self, oc: dict):
+            self.patient_id_encryption_key = oc.get('patient_id_encryption_key', '')
+            self.admin_username = oc.get('admin_username', 'admin')
+            self.admin_password = oc.get('admin_password', 'admon')
+
     class Focus:
         def __init__(self, fc: dict):
             self.provider = fc['provider']
@@ -145,6 +150,15 @@ class Config:
             self.dataset_service_auth_header = fc.get('dataset_service_auth_header', '')
             self.beam_broker_url = fc.get('beam_broker_url', 'https://broker.eucaim.cancerimage.eu')
             self.root_crt_pem = fc.get('root_crt_pem', '')
+
+    class Guacamole:
+        def __init__(self, gc: dict):
+            if 'password' not in gc:
+                raise ValueError("Missing required guacamole config key: 'password'")
+            self.db_password = gc['password']
+            self.username = gc.get('username', 'guacamole')
+            self.database = gc.get('database', 'guacamole')
+            self.admin_password = gc.get('adminPassword', '')
 
 
 def load_config(logger, config_file_path):
