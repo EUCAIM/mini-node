@@ -4,6 +4,7 @@ import argparse
 import enum
 import os
 import logging
+import shlex
 import string
 import random
 import re
@@ -1209,22 +1210,19 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         postgresql_values_file = "postgresql-values.yaml"
         postgresql_private_values_file = "postgresql-values.private.yaml"
         username = "guacamole"
-        # Reuse existing password from private values file to avoid breaking an already-running DB
-        password = None
-        if os.path.exists(postgresql_private_values_file):
-            try:
-                with open(postgresql_private_values_file) as _pf:
-                    _existing_pg = yaml.safe_load(_pf) or {}
-                password = _existing_pg.get('auth', {}).get('password') or None
-                if password:
-                    print(" Reusing existing PostgreSQL password for Guacamole from private values file")
-            except Exception:
-                password = None
-        if not password:
-            password = generate_random_password(16)
+        # Use password from config.private.yaml (guacamole.password)
+        if hasattr(CONFIG, 'guacamole') and CONFIG.guacamole.db_password:
+            password = CONFIG.guacamole.db_password
+            password_is_reused = True
+            print(" Using Guacamole PostgreSQL password from config.private.yaml")
+        else:
+            raise ValueError("Missing 'guacamole.password' in config.private.yaml — please set it before running the installer")
         database = "guacamole"
         adminUsername = "guacamole-admin"
-        adminLocalPassword = guacamole_user_creator_password
+        if hasattr(CONFIG, 'guacamole') and CONFIG.guacamole.admin_password:
+            adminLocalPassword = CONFIG.guacamole.admin_password
+        else:
+            raise ValueError("Missing 'guacamole.adminPassword' in config.private.yaml — please set it before running the installer")
 
         with open(postgresql_values_file, 'r') as f:
             data = yaml.safe_load(f) or {}
@@ -1331,35 +1329,34 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         print(" Waiting for PostgreSQL pod to be ready (timeout: 300s)...")
         cmd("minikube kubectl -- wait --for=condition=ready pod -l app.kubernetes.io/name=postgresql -n guacamole --timeout=300s || true")
 
-        # Verify the guacamole DB user password matches. If not, the PVC has stale data
-        # from a previous install — wipe it and reinitialize PostgreSQL.
+        # Persist the PostgreSQL password in a plain-text file for easy reference after install
+        pg_password_file = "guacamole-postgresql-password.txt"
+        with open(pg_password_file, 'w') as _pf:
+            _pf.write(password + "\n")
+        print(f" PostgreSQL password saved to {pg_password_file}")
+
+        # Check if the current password can connect to PostgreSQL and report status.
+        # Note: the actual password stored in the PVC is hashed — we cannot read it in plaintext.
         print(" Verifying PostgreSQL credentials...")
+        print(f"   Password in use ({'reused from private file' if password_is_reused else 'newly generated'}): {password}")
+        pv_path = cmd_output(
+            "minikube kubectl -- get pv -o json | python3 -c \""
+            "import json,sys; pvs=json.load(sys.stdin);"
+            " [print(p['spec'].get('hostPath',{}).get('path','')) for p in pvs['items']"
+            " if p['spec'].get('claimRef',{}).get('namespace')=='guacamole']\""
+        ).strip().split('\n')[0].strip()
+        print(f"   PVC data directory: {pv_path or '(not found)'}")
         pg_auth_check = cmd_output(
             f"minikube kubectl -- exec -n guacamole postgresql-0 --"
             f" env PGPASSWORD={password} psql -U guacamole -d guacamole -c '\\q' 2>&1"
         )
         if "password authentication failed" in pg_auth_check or "FATAL" in pg_auth_check:
-            print("  PostgreSQL password mismatch detected (stale PVC data). Wiping data directory...")
-
-            # Find the actual hostpath for the guacamole PVC
-            pv_path = cmd_output(
-                "minikube kubectl -- get pv -o json | python3 -c \""
-                "import json,sys; pvs=json.load(sys.stdin);"
-                " [print(p['spec'].get('hostPath',{}).get('path','')) for p in pvs['items']"
-                " if p['spec'].get('claimRef',{}).get('namespace')=='guacamole']\""
-            ).strip().split('\n')[0].strip()
-
-            if pv_path:
-                print(f"  Wiping PV data at: {pv_path}")
-                cmd("minikube kubectl -- scale deploy/guacamole-guacamole -n guacamole --replicas=0", exit_on_error=False)
-                cmd("minikube kubectl -- scale statefulset/postgresql -n guacamole --replicas=0")
-                cmd("sleep 10")
-                cmd(f"minikube ssh -- 'sudo rm -rf {pv_path}'")
-                cmd("minikube kubectl -- scale statefulset/postgresql -n guacamole --replicas=1")
-                cmd("minikube kubectl -- wait --for=condition=ready pod/postgresql-0 -n guacamole --timeout=120s")
-                print(" PostgreSQL reinitialized with correct credentials")
-            else:
-                print("  Warning: Could not determine PV hostpath, skipping wipe")
+            print("  WARNING: PostgreSQL connection failed with current password.")
+            print(f"   The PVC at '{pv_path}' likely contains data from a previous install with a different password.")
+            print("   To fix, wipe the PVC data manually and restart PostgreSQL:")
+            print(f"     minikube kubectl -- scale statefulset/postgresql -n guacamole --replicas=0")
+            print(f"     minikube ssh -- 'sudo rm -rf {pv_path}'")
+            print(f"     minikube kubectl -- scale statefulset/postgresql -n guacamole --replicas=1")
         else:
             print(" PostgreSQL credentials verified OK")
 
@@ -1472,12 +1469,16 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
 
         # Create admin group and eucaim-user-creator user using guacli
         print(f" Creating Guacamole admin group and user-creator...")
-        cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
-            create admin-group cloud-services-and-security-management", exit_on_error=False)
-        cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
-            create admin-user eucaim-user-creator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
-        cmd(f"{guacli_path} --url \"https://{CONFIG.public_domain}/guacamole/\" --user \"{adminUsername}\" --password \"{adminLocalPassword}\" \
-            create admin-user service-account-kubernetes-operator --new-user-password \"{guacamole_user_creator_password}\"", exit_on_error=False)
+        _guac_url = shlex.quote(f"https://{CONFIG.public_domain}/guacamole/")
+        _guac_user = shlex.quote(adminUsername)
+        _guac_pass = shlex.quote(adminLocalPassword)
+        _creator_pass = shlex.quote(guacamole_user_creator_password)
+        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+            f" create admin-group cloud-services-and-security-management", exit_on_error=False)
+        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+            f" create admin-user eucaim-user-creator --new-user-password {_creator_pass}", exit_on_error=False)
+        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+            f" create admin-user service-account-kubernetes-operator --new-user-password {_creator_pass}", exit_on_error=False)
 
     finally:
         os.chdir(prev_dir)
@@ -1696,6 +1697,12 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         # Use the eucaim-user-creator password (generated by install_guacamole) for the operator
         data['operatorConfiguration']['guacamole']['password'] = guacamole_user_creator_password
         print(f" Set Guacamole eucaim-user-creator password in operator configuration")
+
+        # Disable node selection (minikube has a single node, no scheduling constraints needed)
+        if 'k8s' not in data['operatorConfiguration']:
+            data['operatorConfiguration']['k8s'] = {}
+        data['operatorConfiguration']['k8s']['node_selection'] = False
+        print(f" Disabled node_selection in k8s configuration")
 
         # Save updated values
         with open(values_file, 'w') as f:
@@ -3397,9 +3404,17 @@ def install_orthanc(CONFIG):
         cmd("minikube kubectl -- delete pod -n dataset-service -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
         cmd("sleep 3")
 
-        # Apply ConfigMap
+        # Apply ConfigMap — inject admin credentials from config.private.yaml
         if os.path.exists("orthanc-cm.yaml"):
-            cmd("minikube kubectl -- apply -f orthanc-cm.yaml")
+            orthanc_admin_user = getattr(getattr(CONFIG, 'orthanc', None), 'admin_username', 'admin')
+            orthanc_admin_pass = getattr(getattr(CONFIG, 'orthanc', None), 'admin_password', 'admon')
+            with open("orthanc-cm.yaml", 'r') as _f:
+                _cm_content = _f.read()
+            # Replace the hardcoded "admin": "admon" entry with values from config
+            _cm_content = _cm_content.replace('"admin": "admon"', f'"{orthanc_admin_user}": "{orthanc_admin_pass}"')
+            with open("orthanc-cm.private.yaml", 'w') as _f:
+                _f.write(_cm_content)
+            cmd("minikube kubectl -- apply -f orthanc-cm.private.yaml")
 
         # Apply Deployment (uses datalake-data PVC in dataset-service namespace)
         if os.path.exists("orthanc-deploy.yaml"):
