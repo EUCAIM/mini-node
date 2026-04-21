@@ -1718,7 +1718,7 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         # Install or upgrade DSWS Operator
         print(f"\n Checking if DSWS Operator is already installed...")
         cmd(f"helm upgrade --install dsws-operator chaimeleon-services/chaimeleon-operator "
-            f"--version 1.3.1 --namespace dsws-operator -f {values_file}")
+            f"--version 1.3.2 --namespace dsws-operator -f {values_file}")
         print(f" DSWS Operator installed/upgraded successfully")
 
     finally:
