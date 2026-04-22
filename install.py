@@ -1423,12 +1423,12 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         if guacli_check != 0:
             print(f"  Installing guacli via pip3...")
             # Use --break-system-packages for modern Python environments (Debian 12+, Ubuntu 23.04+)
-            install_result = cmd("pip3 install --break-system-packages guacli", exit_on_error=False)
+            install_result = cmd("sudo pip3 install --break-system-packages guacli", exit_on_error=False)
 
             # If that fails, try without the flag (for older systems)
             if install_result != 0:
                 print(f"  Retrying without --break-system-packages flag...")
-                install_result = cmd("pip3 install guacli", exit_on_error=False)
+                install_result = cmd("sudo pip3 install guacli", exit_on_error=False)
 
             # Verify installation
             if cmd("which guacli", exit_on_error=False) == 0:
