@@ -3449,6 +3449,68 @@ def install_orthanc(CONFIG):
         os.chdir(prev_dir)
 
 
+def install_clinical_data_sql_db():
+    '''Install Clinical Data SQL DB - deploys PostgreSQL database for clinical data'''
+    if CONFIG is None:
+        raise Exception("CONFIG is None")
+    
+    print(f"\n{'='*80}")
+    print(" Installing Clinical Data SQL DB")
+    print(f"{'='*80}\n")
+
+    prev_dir = os.getcwd()
+    try:
+        clinical_db_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "clinical-data-sql-db")
+        
+        if not os.path.exists(clinical_db_dir):
+            print(f"  Warning: clinical-data-sql-db directory not found at {clinical_db_dir}")
+            print(f"  Skipping clinical-data-sql-db installation")
+            return
+        
+        os.chdir(clinical_db_dir)
+
+        # Create namespace
+        print(" Creating clinical-data-sql-db namespace...")
+        cmd("minikube kubectl -- create namespace clinical-data-sql-db || true")
+
+        # Create host directories on minikube VM if needed
+        print(" Creating host directories on minikube VM...")
+        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/clinical-data-sql-db'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/clinical-data-sql-db'")
+
+        # Apply PVC
+        if os.path.exists("0-pvc.yaml"):
+            print(" Applying persistent volume claims (0-pvc.yaml)...")
+            cmd("minikube kubectl -- apply -n clinical-data-sql-db -f 0-pvc.yaml")
+        else:
+            print("  Warning: 0-pvc.yaml not found, skipping PVC creation")
+
+        # Inject PostgreSQL password from config into deployment file
+        db_service_file = "1-db-service.yaml"
+        if os.path.exists(db_service_file):
+            print(f" Injecting PostgreSQL password from config into {db_service_file}...")
+            result_db = update_postgres_password(db_service_file, CONFIG.postgres.db_password)
+            
+            # Use the private file if it was created
+            if result_db and isinstance(result_db, str):
+                db_service_file = result_db
+            
+            # Apply database deployment and service
+            print(f" Applying database deployment and service ({db_service_file})...")
+            cmd(f"minikube kubectl -- apply -n clinical-data-sql-db -f {db_service_file}")
+        else:
+            print(f"  Warning: {db_service_file} not found, skipping database deployment")
+
+        print(f"\n Clinical Data SQL DB installation completed")
+        print(f" Namespace: clinical-data-sql-db")
+        print(f" To check status: minikube kubectl -- get all -n clinical-data-sql-db")
+
+    except Exception as e:
+        print(f"  Error during clinical-data-sql-db installation: {e}")
+    finally:
+        os.chdir(prev_dir)
+
+
 FLAVORS = ["micro", "mini", "standard"]
 
 def install(flavor):
@@ -3544,6 +3606,9 @@ def install(flavor):
 
     # Configure kube-apiserver with OIDC - done AFTER Keycloak so the OIDC issuer URL is reachable
     configure_kube_apiserver_oidc(CONFIG)
+
+    # Clinical Data SQL DB is installed in all flavors
+    install_clinical_data_sql_db()
 
     # Dataset service is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
