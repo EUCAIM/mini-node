@@ -3449,6 +3449,115 @@ def install_orthanc(CONFIG):
         os.chdir(prev_dir)
 
 
+def install_orthanc_full(CONFIG):
+    '''Install the full Orthanc stack (PostgreSQL + auth-service + OHIF + own Keycloak).
+    Runs in namespace orthanc-full, completely parallel to the existing orthanc deployment.'''
+    print(f"\n{'='*80}")
+    print(" Installing Orthanc Full Stack (PostgreSQL + auth-service + OHIF + Keycloak)")
+    print(f"{'='*80}\n")
+
+    prev_dir = os.getcwd()
+    try:
+        orthanc_full_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "orthanc-full")
+        os.chdir(orthanc_full_dir)
+
+        # Create namespace
+        print(" Creating orthanc-full namespace...")
+        cmd("minikube kubectl -- create namespace orthanc-full --dry-run=client -o yaml | minikube kubectl -- apply -f -")
+
+        # Read passwords from config or generate random ones
+        cfg_of = getattr(CONFIG, 'orthanc_full', None)
+        db_orthanc_pw   = getattr(cfg_of, 'db_orthanc_password',   None) or generate_random_password(24)
+        db_keycloak_pw  = getattr(cfg_of, 'db_keycloak_password',  None) or generate_random_password(24)
+        auth_secret_key = getattr(cfg_of, 'auth_secret_key',       None) or generate_random_password(48)
+        kc_client_secret = getattr(cfg_of, 'kc_client_secret',     None) or generate_random_password(32)
+        kc_admin_user   = getattr(cfg_of, 'kc_admin_user',         'admin')
+        kc_admin_pw     = getattr(cfg_of, 'kc_admin_password',     None) or generate_random_password(24)
+        svc_user        = getattr(cfg_of, 'svc_internal_user',     'svc-internal')
+        svc_pw          = getattr(cfg_of, 'svc_internal_password', None) or generate_random_password(24)
+
+        svc_users_json = '{' + f'"{svc_user}": "{svc_pw}"' + '}'
+
+        # Create/update secret (idempotent: delete + recreate)
+        print(" Creating orthanc-full-secrets...")
+        cmd("minikube kubectl -- delete secret orthanc-full-secrets -n orthanc-full --ignore-not-found=true")
+        cmd(
+            f"minikube kubectl -- create secret generic orthanc-full-secrets"
+            f" --namespace=orthanc-full"
+            f" --from-literal=DB_ORTHANC_PASSWORD={db_orthanc_pw}"
+            f" --from-literal=DB_KEYCLOAK_PASSWORD={db_keycloak_pw}"
+            f" --from-literal=AUTH_SECRET_KEY={auth_secret_key}"
+            f" --from-literal=KC_CLIENT_SECRET={kc_client_secret}"
+            f" --from-literal=KC_ADMIN_USER={kc_admin_user}"
+            f" --from-literal=KC_ADMIN_PASSWORD={kc_admin_pw}"
+            f" --from-literal=SVC_INTERNAL_USER={svc_user}"
+            f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw}"
+            f" --from-literal=SVC_INTERNAL_USERS_JSON={shlex.quote(svc_users_json)}"
+        )
+
+        # Create host directories for PVs
+        print(" Creating host directories for PVs...")
+        for subdir in ["orthanc-storage/db", "orthanc-storage/dicom", "orthanc-db", "keycloak-db"]:
+            cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc-full/{subdir}'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc-full'")
+
+        # Apply PVCs
+        print(" Applying PVCs...")
+        cmd("minikube kubectl -- apply -f orthanc-full-pvc.yaml")
+
+        # Apply ConfigMap with domain substituted (write to private copy)
+        print(" Applying ConfigMap...")
+        with open("orthanc-full-cm.yaml", 'r') as f:
+            cm_content = f.read()
+        cm_content = cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
+        with open("orthanc-full-cm.private.yaml", 'w') as f:
+            f.write(cm_content)
+        cmd("minikube kubectl -- apply -f orthanc-full-cm.private.yaml")
+
+        # Apply Deployments and Services (with domain substituted)
+        print(" Applying Deployments and Services...")
+        with open("orthanc-full-deploy.yaml", 'r') as f:
+            deploy_content = f.read()
+        deploy_content = deploy_content.replace("YOURDOMAIN", CONFIG.public_domain)
+        with open("orthanc-full-deploy.private.yaml", 'w') as f:
+            f.write(deploy_content)
+        cmd("minikube kubectl -- apply -f orthanc-full-deploy.private.yaml")
+
+        # Wait for databases to be ready before auth-service and orthanc start
+        print(" Waiting for orthanc-full-db to be ready...")
+        cmd("minikube kubectl -- wait --for=condition=available deployment/orthanc-full-db -n orthanc-full --timeout=120s || true")
+        print(" Waiting for orthanc-full-keycloak-db to be ready...")
+        cmd("minikube kubectl -- wait --for=condition=available deployment/orthanc-full-keycloak-db -n orthanc-full --timeout=120s || true")
+
+        # Apply Ingress or HTTPRoute
+        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
+        if use_gateway_api:
+            httproute_file = "orthanc-full-httproute.yaml"
+            if os.path.exists(httproute_file):
+                update_ingress_host(httproute_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {httproute_file}")
+                print(f" Applied HTTPRoute for orthanc-full with domain: {CONFIG.public_domain}")
+            else:
+                print(f"  Warning: {httproute_file} not found")
+        else:
+            ingress_file = "orthanc-full-ingress.yaml"
+            if os.path.exists(ingress_file):
+                update_ingress_host(ingress_file, CONFIG.public_domain)
+                cmd(f"minikube kubectl -- apply -f {ingress_file}")
+                print(f" Applied Ingress for orthanc-full with domain: {CONFIG.public_domain}")
+            else:
+                print(f"  Warning: {ingress_file} not found")
+
+        print(f"\n Orthanc Full Stack installation completed")
+        print(f"   Orthanc:          https://{CONFIG.public_domain}/orthanc-full")
+        print(f"   OHIF Viewer:      https://{CONFIG.public_domain}/ohif")
+        print(f"   Orthanc Keycloak: https://{CONFIG.public_domain}/orthanc-keycloak")
+        print(f"   Keycloak admin:   {kc_admin_user} / {kc_admin_pw}")
+
+    finally:
+        os.chdir(prev_dir)
+
+
 def install_clinical_data_sql_db():
     '''Install Clinical Data SQL DB - deploys PostgreSQL database for clinical data'''
     if CONFIG is None:
@@ -3626,6 +3735,9 @@ def install(flavor):
     # Orthanc PACS server is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
         install_orthanc(CONFIG)
+
+    if flavor in ["micro", "mini", "standard"] or getattr(getattr(CONFIG, 'orthanc_full', None), 'enabled', False):
+        install_orthanc_full(CONFIG)
 
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "mini", "standard"]:
