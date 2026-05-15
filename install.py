@@ -3493,6 +3493,8 @@ def install_orthanc_full(CONFIG):
             f" --from-literal=SVC_INTERNAL_USER={svc_user}"
             f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw}"
             f" --from-literal=SVC_INTERNAL_USERS_JSON={shlex.quote(svc_users_json)}"
+            f" --from-literal=patient-id-encryption-key={CONFIG.orthanc.patient_id_encryption_key}"
+
         )
 
         # Create host directories for PVs
