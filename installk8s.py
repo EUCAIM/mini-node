@@ -1,4 +1,4 @@
-#! /usr/bin/env python3
+K8s#! /usr/bin/env python3
 
 import argparse
 import enum
@@ -3753,7 +3753,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.k8s:
-        global KUBECTL, USE_MINIKUBE
         KUBECTL = "kubectl"
         USE_MINIKUBE = False
         print("K8s mode enabled: using 'kubectl' instead of 'minikube kubectl --'")
