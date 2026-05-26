@@ -140,8 +140,16 @@ class Config:
     class Orthanc:
         def __init__(self, oc: dict):
             self.patient_id_encryption_key = oc.get('patient_id_encryption_key', '')
-            self.admin_username = oc.get('admin_username', 'admin')
-            self.admin_password = oc.get('admin_password', 'admon')
+            self.admin_username            = oc.get('admin_username', 'admin')
+            self.admin_password            = oc.get('admin_password', 'admon')
+            self.db_orthanc_password       = oc.get('db_orthanc_password')
+            self.db_keycloak_password      = oc.get('db_keycloak_password')
+            self.auth_secret_key           = oc.get('auth_secret_key')
+            self.kc_client_secret          = oc.get('kc_client_secret')
+            self.kc_admin_user             = oc.get('kc_admin_user', 'admin')
+            self.kc_admin_password         = oc.get('kc_admin_password')
+            self.svc_internal_user         = oc.get('svc_internal_user', 'svc-internal')
+            self.svc_internal_password     = oc.get('svc_internal_password')
 
     class Focus:
         def __init__(self, fc: dict):

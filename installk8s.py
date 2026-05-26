@@ -3397,199 +3397,107 @@ def install_orthanc(CONFIG):
         print(" Creating orthanc namespace...")
         cmd("minikube kubectl -- create namespace orthanc --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
-        # Create patient-id-encryption-key secret (only if it doesn't already exist)
-        encryption_key = getattr(getattr(CONFIG, 'orthanc', None), 'patient_id_encryption_key', '')
-        if encryption_key:
-            existing_secret = cmd_output(
-                "minikube kubectl -- get secret patient-id-encryption-key -n orthanc"
-                " --ignore-not-found -o jsonpath='{.metadata.name}'"
-            ).strip()
-            if existing_secret == 'patient-id-encryption-key':
-                print(" Secret 'patient-id-encryption-key' already exists, skipping (delete manually to recreate)")
-            else:
-                cmd(f"minikube kubectl -- create secret generic patient-id-encryption-key"
-                    f" --from-literal=patient-id-encryption-key={encryption_key}"
-                    f" --namespace=orthanc")
-                print(" Created patient-id-encryption-key secret in orthanc namespace")
-        else:
-            print("  Warning: orthanc.patient_id_encryption_key not set in config, skipping secret creation")
+        # Create all host directories for PVs
+        print(" Creating host directories for PVs...")
+        for subdir in ["orthanc-storage", "orthanc-db", "keycloak-db", "orthanc-wrapper"]:
+            cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/{subdir}'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
 
-        # Orthanc now uses dataset-service namespace (no separate namespace needed)
-        print(" Using dataset-service namespace to share PVC...")
-
-        # Create Orthanc directories in the shared datalake volume
-        print(" Creating Orthanc directories in shared datalake-data PVC...")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/db'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/orthanc/dicom'")
-        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/orthanc'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/scripts'")
-        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/datalake/scripts'")
-        scripts_src = os.path.join(orthanc_dir, "scripts")
-        if os.path.exists(scripts_src):
-            cmd(f"minikube cp {scripts_src}/script.lua minikube:/var/hostpath-provisioner/dataset-service/datalake/scripts/")
-        # Apply PVC for Orthanc (PV uses the shared datalake hostPath, no extra dir needed)
+        # Apply PVs and PVCs
         if os.path.exists("orthanc-pvc.yaml"):
-            print(" Applying Orthanc PV and PVC...")
+            print(" Applying Orthanc PVs and PVCs...")
             cmd("minikube kubectl -- apply -f orthanc-pvc.yaml")
 
-        # Clean up current namespace deployment to clear any stale PVC references
-        print(" Removing any stale Orthanc deployment in dataset-service...")
-        cmd("minikube kubectl -- delete deployment orthanc -n dataset-service --ignore-not-found=true")
-        cmd("minikube kubectl -- delete replicaset -n dataset-service -l app=orthanc --ignore-not-found=true")
-        cmd("minikube kubectl -- delete pod -n dataset-service -l app=orthanc --force --grace-period=0 --ignore-not-found=true")
-        cmd("sleep 3")
+        # Create orthanc-secrets from config (idempotent)
+        import json as _json
+        oc = getattr(CONFIG, 'orthanc', None)
+        encryption_key = getattr(oc, 'patient_id_encryption_key', '')
+        if oc and oc.db_orthanc_password:
+            svc_user = oc.svc_internal_user or 'svc-internal'
+            svc_pw   = oc.svc_internal_password or ''
+            users_json = _json.dumps({svc_user: svc_pw})
+            print(" Creating orthanc-secrets...")
+            cmd("minikube kubectl -- delete secret orthanc-secrets -n orthanc --ignore-not-found=true")
+            cmd(
+                f"minikube kubectl -- create secret generic orthanc-secrets"
+                f" --namespace=orthanc"
+                f" --from-literal=AUTH_SECRET_KEY={oc.auth_secret_key}"
+                f" --from-literal=DB_ORTHANC_PASSWORD={oc.db_orthanc_password}"
+                f" --from-literal=DB_KEYCLOAK_PASSWORD={oc.db_keycloak_password}"
+                f" --from-literal=KC_ADMIN_USER={oc.kc_admin_user}"
+                f" --from-literal=KC_ADMIN_PASSWORD={oc.kc_admin_password}"
+                f" --from-literal=KC_CLIENT_SECRET={oc.kc_client_secret}"
+                f" --from-literal=SVC_INTERNAL_USER={svc_user}"
+                f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw}"
+                f" --from-literal=SVC_INTERNAL_USERS_JSON={shlex.quote(users_json)}"
+                f" --from-literal=patient-id-encryption-key={encryption_key}"
+            )
+        else:
+            print("  Warning: orthanc secrets not set in config, skipping orthanc-secrets creation")
 
-        # Apply ConfigMap — inject admin credentials from config.private.yaml
+        # Apply ConfigMap with domain substitution
         if os.path.exists("orthanc-cm.yaml"):
-            orthanc_admin_user = getattr(getattr(CONFIG, 'orthanc', None), 'admin_username', 'admin')
-            orthanc_admin_pass = getattr(getattr(CONFIG, 'orthanc', None), 'admin_password', 'admon')
+            print(" Applying Orthanc ConfigMap...")
             with open("orthanc-cm.yaml", 'r') as _f:
                 _cm_content = _f.read()
-            # Replace the hardcoded "admin": "admon" entry with values from config
-            _cm_content = _cm_content.replace('"admin": "admon"', f'"{orthanc_admin_user}": "{orthanc_admin_pass}"')
+            _cm_content = _cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
             with open("orthanc-cm.private.yaml", 'w') as _f:
                 _f.write(_cm_content)
             cmd("minikube kubectl -- apply -f orthanc-cm.private.yaml")
 
-        # Apply Deployment (uses datalake-data PVC in dataset-service namespace)
+        # Apply deploy YAML with domain substitution for auth-service URLs
         if os.path.exists("orthanc-deploy.yaml"):
-            cmd("minikube kubectl -- apply -f orthanc-deploy.yaml")
+            print(" Applying Orthanc Deployments...")
+            with open("orthanc-deploy.yaml", 'r') as _f:
+                _deploy_content = _f.read()
+            _deploy_content = _deploy_content.replace("YOURDOMAIN", CONFIG.public_domain)
+            with open("orthanc-deploy.private.yaml", 'w') as _f:
+                _f.write(_deploy_content)
+            cmd("minikube kubectl -- apply -f orthanc-deploy.private.yaml")
 
-        # Handle Ingress/HTTPRoute based on configuration
-        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
-
-        if use_gateway_api:
-            # Use HTTPRoute (Gateway API)
-            httproute_file = "orthanc-httproute.yaml"
-            if os.path.exists(httproute_file):
-                update_ingress_host(httproute_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -f {httproute_file}")
-                print(f" Applied HTTPRoute for Orthanc with domain: {CONFIG.public_domain}")
-            else:
-                print(f"  Warning: {httproute_file} not found")
+        # Apply Ingress with domain substitution
+        ingress_file = "orthanc-ingress.yaml"
+        if os.path.exists(ingress_file):
+            update_ingress_host(ingress_file, CONFIG.public_domain)
+            cmd(f"minikube kubectl -- apply -f {ingress_file}")
+            print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
         else:
-            # LEGACY: Use traditional Ingress
-            ingress_file = "orthanc-ingress.yaml"
-            if os.path.exists(ingress_file):
-                update_ingress_host(ingress_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -f {ingress_file}")
-                print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
-            else:
-                print(f"  Warning: {ingress_file} not found")
+            print(f"  Warning: {ingress_file} not found")
+
+        # Setup bindfs mounts on the minikube node so that desktops and jobman
+        # can access datalake files with symlinks resolved to the real DICOM files.
+        print(" Setting up bindfs mounts on minikube node...")
+        cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
+
+        # 1. /var/lib/orthanc on the host → actual orthanc storage (needed to resolve symlinks)
+        cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
+        cmd("minikube ssh -- '"
+            "grep -q \"/var/lib/orthanc \" /etc/fstab || "
+            "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
+            "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+            " >> /etc/fstab'")
+        cmd("minikube ssh -- 'mount | grep -q \"/var/lib/orthanc\" || sudo mount /var/lib/orthanc/'")
+
+        # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
+        cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake'")
+        cmd("minikube ssh -- '"
+            "grep -q \"/mnt/datalake \" /etc/fstab || "
+            "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
+            "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+            " >> /etc/fstab'")
+        cmd("minikube ssh -- 'mount | grep -q \"/mnt/datalake \" || sudo mount /mnt/datalake'")
+
+        # 3. /mnt/datasets → datasets (for desktops/jobman)
+        cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
+        cmd("minikube ssh -- '"
+            "grep -q \"/mnt/datasets \" /etc/fstab || "
+            "printf \"/var/hostpath-provisioner/dataset-service/datasets"
+            "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+            " >> /etc/fstab'")
+        cmd("minikube ssh -- 'mount | grep -q \"/mnt/datasets \" || sudo mount /mnt/datasets'")
 
         print(f" Orthanc installation completed")
         print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
-
-    finally:
-        os.chdir(prev_dir)
-
-
-def install_orthanc_full(CONFIG):
-    '''Install the full Orthanc stack (PostgreSQL + auth-service + OHIF + own Keycloak).
-    Runs in namespace orthanc-full, completely parallel to the existing orthanc deployment.'''
-    print(f"\n{'='*80}")
-    print(" Installing Orthanc Full Stack (PostgreSQL + auth-service + OHIF + Keycloak)")
-    print(f"{'='*80}\n")
-
-    prev_dir = os.getcwd()
-    try:
-        orthanc_full_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "orthanc-full")
-        os.chdir(orthanc_full_dir)
-
-        # Create namespace
-        print(" Creating orthanc-full namespace...")
-        cmd("minikube kubectl -- create namespace orthanc-full --dry-run=client -o yaml | minikube kubectl -- apply -f -")
-
-        # Read passwords from config or generate random ones
-        cfg_of = getattr(CONFIG, 'orthanc_full', None)
-        db_orthanc_pw   = getattr(cfg_of, 'db_orthanc_password',   None) or generate_random_password(24)
-        db_keycloak_pw  = getattr(cfg_of, 'db_keycloak_password',  None) or generate_random_password(24)
-        auth_secret_key = getattr(cfg_of, 'auth_secret_key',       None) or generate_random_password(48)
-        kc_client_secret = getattr(cfg_of, 'kc_client_secret',     None) or generate_random_password(32)
-        kc_admin_user   = getattr(cfg_of, 'kc_admin_user',         'admin')
-        kc_admin_pw     = getattr(cfg_of, 'kc_admin_password',     None) or generate_random_password(24)
-        svc_user        = getattr(cfg_of, 'svc_internal_user',     'svc-internal')
-        svc_pw          = getattr(cfg_of, 'svc_internal_password', None) or generate_random_password(24)
-
-        svc_users_json = '{' + f'"{svc_user}": "{svc_pw}"' + '}'
-
-        # Create/update secret (idempotent: delete + recreate)
-        print(" Creating orthanc-full-secrets...")
-        cmd("minikube kubectl -- delete secret orthanc-full-secrets -n orthanc-full --ignore-not-found=true")
-        cmd(
-            f"minikube kubectl -- create secret generic orthanc-full-secrets"
-            f" --namespace=orthanc-full"
-            f" --from-literal=DB_ORTHANC_PASSWORD={db_orthanc_pw}"
-            f" --from-literal=DB_KEYCLOAK_PASSWORD={db_keycloak_pw}"
-            f" --from-literal=AUTH_SECRET_KEY={auth_secret_key}"
-            f" --from-literal=KC_CLIENT_SECRET={kc_client_secret}"
-            f" --from-literal=KC_ADMIN_USER={kc_admin_user}"
-            f" --from-literal=KC_ADMIN_PASSWORD={kc_admin_pw}"
-            f" --from-literal=SVC_INTERNAL_USER={svc_user}"
-            f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw}"
-            f" --from-literal=SVC_INTERNAL_USERS_JSON={shlex.quote(svc_users_json)}"
-            f" --from-literal=patient-id-encryption-key={CONFIG.orthanc.patient_id_encryption_key}"
-
-        )
-
-        # Create host directories for PVs
-        print(" Creating host directories for PVs...")
-        for subdir in ["orthanc-storage/db", "orthanc-storage/dicom", "orthanc-db", "keycloak-db"]:
-            cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc-full/{subdir}'")
-        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc-full'")
-
-        # Apply PVCs
-        print(" Applying PVCs...")
-        cmd("minikube kubectl -- apply -f orthanc-full-pvc.yaml")
-
-        # Apply ConfigMap with domain substituted (write to private copy)
-        print(" Applying ConfigMap...")
-        with open("orthanc-full-cm.yaml", 'r') as f:
-            cm_content = f.read()
-        cm_content = cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
-        with open("orthanc-full-cm.private.yaml", 'w') as f:
-            f.write(cm_content)
-        cmd("minikube kubectl -- apply -f orthanc-full-cm.private.yaml")
-
-        # Apply Deployments and Services (with domain substituted)
-        print(" Applying Deployments and Services...")
-        with open("orthanc-full-deploy.yaml", 'r') as f:
-            deploy_content = f.read()
-        deploy_content = deploy_content.replace("YOURDOMAIN", CONFIG.public_domain)
-        with open("orthanc-full-deploy.private.yaml", 'w') as f:
-            f.write(deploy_content)
-        cmd("minikube kubectl -- apply -f orthanc-full-deploy.private.yaml")
-
-        # Wait for databases to be ready before auth-service and orthanc start
-        print(" Waiting for orthanc-full-db to be ready...")
-        cmd("minikube kubectl -- wait --for=condition=available deployment/orthanc-full-db -n orthanc-full --timeout=120s || true")
-        print(" Waiting for orthanc-full-keycloak-db to be ready...")
-        cmd("minikube kubectl -- wait --for=condition=available deployment/orthanc-full-keycloak-db -n orthanc-full --timeout=120s || true")
-
-        # Apply Ingress or HTTPRoute
-        use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
-        if use_gateway_api:
-            httproute_file = "orthanc-full-httproute.yaml"
-            if os.path.exists(httproute_file):
-                update_ingress_host(httproute_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -f {httproute_file}")
-                print(f" Applied HTTPRoute for orthanc-full with domain: {CONFIG.public_domain}")
-            else:
-                print(f"  Warning: {httproute_file} not found")
-        else:
-            ingress_file = "orthanc-full-ingress.yaml"
-            if os.path.exists(ingress_file):
-                update_ingress_host(ingress_file, CONFIG.public_domain)
-                cmd(f"minikube kubectl -- apply -f {ingress_file}")
-                print(f" Applied Ingress for orthanc-full with domain: {CONFIG.public_domain}")
-            else:
-                print(f"  Warning: {ingress_file} not found")
-
-        print(f"\n Orthanc Full Stack installation completed")
-        print(f"   Orthanc:          https://{CONFIG.public_domain}/orthanc-full")
-        print(f"   OHIF Viewer:      https://{CONFIG.public_domain}/ohif")
-        print(f"   Orthanc Keycloak: https://{CONFIG.public_domain}/orthanc-keycloak")
-        print(f"   Keycloak admin:   {kc_admin_user} / {kc_admin_pw}")
 
     finally:
         os.chdir(prev_dir)
@@ -3773,9 +3681,6 @@ def install(flavor):
     if flavor in ["micro", "mini", "standard"]:
         install_orthanc(CONFIG)
 
-    if flavor in ["micro", "mini", "standard"] or getattr(getattr(CONFIG, 'orthanc_full', None), 'enabled', False):
-        install_orthanc_full(CONFIG)
-
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "mini", "standard"]:
         configure_user_management_job_template(CONFIG, auth_client_secrets, guacamole_user_creator_password)
@@ -3848,6 +3753,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.k8s:
+        global KUBECTL, USE_MINIKUBE
         KUBECTL = "kubectl"
         USE_MINIKUBE = False
         print("K8s mode enabled: using 'kubectl' instead of 'minikube kubectl --'")

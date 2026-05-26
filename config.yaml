@@ -45,9 +45,18 @@ oidc:
   groups_claim_type: "groups"
 
 orthanc:
-  patient_id_encryption_key: ""
-  admin_username: ""
-  admin_password: ""
+  patient_id_encryption_key: "your_secret_encryption_key_here"
+    # Key used to encrypt patient IDs in Orthanc via the Lua script
+  admin_username: "admin"
+  admin_password: "admon"
+  kc_admin_user: "admin"
+  kc_admin_password: "tupassword_keycloak"
+  db_orthanc_password: "tupassword_db_orthanc"
+  db_keycloak_password: "tupassword_db_keycloak"
+  kc_client_secret: "tupassword_client_secret"
+  svc_internal_user: "svc-internal"
+  svc_internal_password: "tupassword_svc"
+  auth_secret_key: "una_clave_larga_aleatoria_de_al_menos_32_chars"
 
 letsencrypt:
   email: "admin@i3m.upv.es"
