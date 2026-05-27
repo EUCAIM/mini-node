@@ -24,8 +24,8 @@ K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
 CONFIG = None
 
 # Deployment target: minikube (default) or real K8s cluster (set via --k8s flag)
-KUBECTL = "minikube kubectl --" 
-USE_MINIKUBE = True              
+KUBECTL = "minikube kubectl --"
+USE_MINIKUBE = True
 
 def _prepare_command(command):
     '''Substitute kubectl and skip minikube-only commands based on deployment target.'''
@@ -1057,7 +1057,7 @@ def install_dataset_explorer(CONFIG):
 
             # Replace any qpinsights link/icon with orthanc in externalServices
             # APLICAR PVC Y quitar el NAMESPACE ORTHANC-OHIF
-            # 
+            #
             if "externalServices" in config_data:
                 for service in config_data["externalServices"]:
                     if "qpinsights" in service.get("link", "").lower():
@@ -3456,9 +3456,11 @@ def install_orthanc(CONFIG):
             cmd("minikube kubectl -- apply -f orthanc-deploy.private.yaml")
 
         # Apply Ingress with domain substitution
+        # Delete first to avoid nginx admission webhook rejecting updates on existing host/path combos
         ingress_file = "orthanc-ingress.yaml"
         if os.path.exists(ingress_file):
             update_ingress_host(ingress_file, CONFIG.public_domain)
+            cmd("minikube kubectl -- delete ingress -n orthanc --all --ignore-not-found=true")
             cmd(f"minikube kubectl -- apply -f {ingress_file}")
             print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
         else:
@@ -3469,32 +3471,35 @@ def install_orthanc(CONFIG):
         print(" Setting up bindfs mounts on minikube node...")
         cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
 
-        # 1. /var/lib/orthanc on the host → actual orthanc storage (needed to resolve symlinks)
+        # 1. /var/lib/orthanc → actual orthanc storage (needed to resolve symlinks)
         cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
         cmd("minikube ssh -- '"
-            "grep -q \"/var/lib/orthanc \" /etc/fstab || "
+            "sudo sed -i \"/var\\/lib\\/orthanc/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
             "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " >> /etc/fstab'")
-        cmd("minikube ssh -- 'mount | grep -q \"/var/lib/orthanc\" || sudo mount /var/lib/orthanc/'")
+            " | sudo tee -a /etc/fstab > /dev/null'")
 
         # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
         cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake'")
         cmd("minikube ssh -- '"
-            "grep -q \"/mnt/datalake \" /etc/fstab || "
+            "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
             "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " >> /etc/fstab'")
-        cmd("minikube ssh -- 'mount | grep -q \"/mnt/datalake \" || sudo mount /mnt/datalake'")
+            " | sudo tee -a /etc/fstab > /dev/null'")
 
         # 3. /mnt/datasets → datasets (for desktops/jobman)
         cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
         cmd("minikube ssh -- '"
-            "grep -q \"/mnt/datasets \" /etc/fstab || "
+            "sudo sed -i \"/mnt\\/datasets/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/dataset-service/datasets"
             "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " >> /etc/fstab'")
-        cmd("minikube ssh -- 'mount | grep -q \"/mnt/datasets \" || sudo mount /mnt/datasets'")
+            " | sudo tee -a /etc/fstab > /dev/null'")
+
+        # Reload systemd so it sees the new fstab, then (re)mount all three
+        cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
+        cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
+        cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
+        cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
 
         print(f" Orthanc installation completed")
         print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
@@ -3507,7 +3512,7 @@ def install_clinical_data_sql_db():
     '''Install Clinical Data SQL DB - deploys PostgreSQL database for clinical data'''
     if CONFIG is None:
         raise Exception("CONFIG is None")
-    
+
     print(f"\n{'='*80}")
     print(" Installing Clinical Data SQL DB")
     print(f"{'='*80}\n")
@@ -3515,12 +3520,12 @@ def install_clinical_data_sql_db():
     prev_dir = os.getcwd()
     try:
         clinical_db_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "clinical-data-sql-db")
-        
+
         if not os.path.exists(clinical_db_dir):
             print(f"  Warning: clinical-data-sql-db directory not found at {clinical_db_dir}")
             print(f"  Skipping clinical-data-sql-db installation")
             return
-        
+
         os.chdir(clinical_db_dir)
 
         # Create namespace
@@ -3544,11 +3549,11 @@ def install_clinical_data_sql_db():
         if os.path.exists(db_service_file):
             print(f" Injecting PostgreSQL password from config into {db_service_file}...")
             result_db = update_postgres_password(db_service_file, CONFIG.postgres.db_password)
-            
+
             # Use the private file if it was created
             if result_db and isinstance(result_db, str):
                 db_service_file = result_db
-            
+
             # Apply database deployment and service
             print(f" Applying database deployment and service ({db_service_file})...")
             cmd(f"minikube kubectl -- apply -n clinical-data-sql-db -f {db_service_file}")
