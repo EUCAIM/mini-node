@@ -24,8 +24,8 @@ K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
 CONFIG = None
 
 # Deployment target: minikube (default) or real K8s cluster (set via --k8s flag)
-KUBECTL = "minikube kubectl --" 
-USE_MINIKUBE = True              
+KUBECTL = "minikube kubectl --"
+USE_MINIKUBE = True
 
 def _prepare_command(command):
     '''Substitute kubectl and skip minikube-only commands based on deployment target.'''
@@ -1057,7 +1057,7 @@ def install_dataset_explorer(CONFIG):
 
             # Replace any qpinsights link/icon with orthanc in externalServices
             # APLICAR PVC Y quitar el NAMESPACE ORTHANC-OHIF
-            # 
+            #
             if "externalServices" in config_data:
                 for service in config_data["externalServices"]:
                     if "qpinsights" in service.get("link", "").lower():
@@ -1150,6 +1150,84 @@ def install_fem_client(CONFIG: Config, auth_client_secrets: Auth_client_secrets)
 
     fem_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "fem-client")
 
+    fem_cfg = getattr(CONFIG, 'fem', None)
+    fem_node_name = getattr(fem_cfg, 'node_name', 'EUCAIM')
+    fem_cert_prefix = getattr(fem_cfg, 'cert_prefix', fem_node_name)
+    fem_node_user = getattr(fem_cfg, 'node_user', 'EUCAIMrmq')
+    fem_node_password = getattr(fem_cfg, 'node_password', 'xxxx')
+    fem_central_server_ip = getattr(fem_cfg, 'central_server_ip', 'fedcomp.eucaim.cancerimage.eu')
+    fem_central_server_port = getattr(fem_cfg, 'central_server_port', 5671)
+    fem_central_rabbitmq_vhost = getattr(fem_cfg, 'central_rabbitmq_vhost', 'rabbit_server')
+    fem_api_base_url = getattr(fem_cfg, 'api_base_url', 'https://fedcomp.eucaim.cancerimage.eu/orchestrator/eucaim-fem/API/v1')
+    fem_client_id = getattr(fem_cfg, 'client_id', 'fem-client')
+    fem_audience = getattr(fem_cfg, 'audience', 'jobman-service')
+    fem_subject_issuer = getattr(fem_cfg, 'subject_issuer', 'lifescience-ri-oidc')
+    fem_dataset_id = getattr(fem_cfg, 'dataset_id', 'c2677037-3e1a-4cc2-90f0-e76cb677de17')
+
+    def register_fem_host_metadata():
+        mongo_uri = getattr(fem_cfg, 'mongodb_uri', '') if fem_cfg else ''
+        mongo_db = getattr(fem_cfg, 'mongodb_database', '') if fem_cfg else ''
+        mongo_collection = getattr(fem_cfg, 'mongodb_collection', 'hosts') if fem_cfg else 'hosts'
+
+        if not mongo_uri or not mongo_db:
+            print(" Skipping FEM hosts registration: set fem.mongodb_uri and fem.mongodb_database in config.private.yaml")
+            return
+
+        if not re.fullmatch(r'[A-Z0-9_]+', fem_node_name or ''):
+            print(f" WARNING: FEM node_name '{fem_node_name}' does not match required pattern [A-Z0-9_]+")
+            print("   Skipping MongoDB hosts registration")
+            return
+
+        host_name = getattr(fem_cfg, 'host_display_name', fem_node_name)
+        accessible_via = getattr(fem_cfg, 'accessible_via', 'ampq')
+        launchers = getattr(fem_cfg, 'launchers', ["Docker", "Singularity", "Jobman"])
+        whitelist_ip = getattr(fem_cfg, 'whitelist_ip', [])
+        status = getattr(fem_cfg, 'status', 'active')
+
+        if not isinstance(launchers, list):
+            launchers = ["Docker", "Singularity", "Jobman"]
+        if not isinstance(whitelist_ip, list):
+            whitelist_ip = []
+        if not whitelist_ip:
+            node_ip = get_node_ip()
+            if node_ip:
+                whitelist_ip = [node_ip]
+
+        host_doc = {
+            "_id": fem_node_name,
+            "name": host_name,
+            "accessible_via": accessible_via,
+            "launchers": launchers,
+            "whitelist_ip": whitelist_ip,
+            "status": status,
+        }
+
+        try:
+            from pymongo import MongoClient
+        except Exception as e:
+            print(f" WARNING: pymongo is required for FEM hosts registration but is not available: {e}")
+            print("   Install with: pip3 install pymongo")
+            return
+
+        try:
+            client = MongoClient(mongo_uri, serverSelectionTimeoutMS=5000)
+            client.admin.command("ping")
+            result = client[mongo_db][mongo_collection].update_one(
+                {"_id": fem_node_name},
+                {"$set": host_doc},
+                upsert=True,
+            )
+            if result.upserted_id is not None:
+                print(f" Registered FEM host '{fem_node_name}' in MongoDB ({mongo_db}.{mongo_collection})")
+            else:
+                print(f" Updated FEM host '{fem_node_name}' in MongoDB ({mongo_db}.{mongo_collection})")
+            client.close()
+        except Exception as e:
+            print(f" WARNING: Could not register FEM host metadata in MongoDB: {e}")
+
+    # Register this node in FEM orchestrator metadata DB (hosts collection)
+    register_fem_host_metadata()
+
     # --- Substitute domain and client secret in cm-fem.yaml → cm-fem.private.yaml ---
     cm_src  = os.path.join(fem_dir, "cm-fem.yaml")
     cm_priv = os.path.join(fem_dir, "cm-fem.private.yaml")
@@ -1165,6 +1243,20 @@ def install_fem_client(CONFIG: Config, auth_client_secrets: Auth_client_secrets)
         '"client_secret": "xxxxx"',
         f'"client_secret": "{auth_client_secrets.CLIENT_FEM_CLIENT_SECRET}"'
     )
+    cm_content = cm_content.replace("node_name = 'EUCAIM'", f"node_name = '{fem_node_name}'")
+    cm_content = cm_content.replace("node_user = 'EUCAIMrmq'", f"node_user = '{fem_node_user}'")
+    cm_content = cm_content.replace("node_password = 'xxxx'", f"node_password = '{fem_node_password}'")
+    cm_content = cm_content.replace("central_server_ip = 'fedcomp.eucaim.cancerimage.eu'", f"central_server_ip = '{fem_central_server_ip}'")
+    cm_content = cm_content.replace("central_server_port = 5671", f"central_server_port = {fem_central_server_port}")
+    cm_content = cm_content.replace("central_rabbitmq_vhost = 'rabbit_server'", f"central_rabbitmq_vhost = '{fem_central_rabbitmq_vhost}'")
+    cm_content = cm_content.replace(
+        "api_base_url =\n    'https://fedcomp.eucaim.cancerimage.eu/orchestrator/eucaim-fem/API/v1'",
+        f"api_base_url =\n    '{fem_api_base_url}'"
+    )
+    cm_content = cm_content.replace('"client_id": "fem-client"', f'"client_id": "{fem_client_id}"')
+    cm_content = cm_content.replace('"audience": "jobman-service"', f'"audience": "{fem_audience}"')
+    cm_content = cm_content.replace('"subject_issuer": "lifescience-ri-oidc"', f'"subject_issuer": "{fem_subject_issuer}"')
+    cm_content = cm_content.replace('"DATASET_ID": "c2677037-3e1a-4cc2-90f0-e76cb677de17"', f'"DATASET_ID": "{fem_dataset_id}"')
 
     with open(cm_priv, "w") as f:
         f.write(cm_content)
@@ -1190,6 +1282,19 @@ def install_fem_client(CONFIG: Config, auth_client_secrets: Auth_client_secrets)
     with open(secret_priv, "w") as f:
         f.write(secret_content)
 
+    # Keep certificate filenames aligned with node identity used by FEM config.
+    secret_content = secret_content.replace("EUCAIM_client_", f"{fem_cert_prefix}_client_")
+    with open(secret_priv, "w") as f:
+        f.write(secret_content)
+
+    deploy_src = os.path.join(fem_dir, "deploy-fem.yaml")
+    deploy_priv = os.path.join(fem_dir, "deploy-fem.private.yaml")
+    with open(deploy_src, "r") as f:
+        deploy_content = f.read()
+    deploy_content = deploy_content.replace("EUCAIM_client_", f"{fem_cert_prefix}_client_")
+    with open(deploy_priv, "w") as f:
+        f.write(deploy_content)
+
     # --- Ensure the namespace exists ---
     cmd("minikube kubectl -- create namespace eucaim-fed-computation --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
@@ -1205,7 +1310,7 @@ def install_fem_client(CONFIG: Config, auth_client_secrets: Auth_client_secrets)
         secret_priv,
         cm_priv,
         os.path.join(fem_dir, "service-fem.yaml"),
-        os.path.join(fem_dir, "deploy-fem.yaml"),
+        deploy_priv,
     ]
 
     for manifest in manifests:
@@ -3416,21 +3521,31 @@ def install_orthanc(CONFIG):
             svc_user = oc.svc_internal_user or 'svc-internal'
             svc_pw   = oc.svc_internal_password or ''
             users_json = _json.dumps({svc_user: svc_pw})
+            auth_secret_key_q = shlex.quote(oc.auth_secret_key or '')
+            db_orthanc_password_q = shlex.quote(oc.db_orthanc_password or '')
+            db_keycloak_password_q = shlex.quote(oc.db_keycloak_password or '')
+            kc_admin_user_q = shlex.quote(oc.kc_admin_user or '')
+            kc_admin_password_q = shlex.quote(oc.kc_admin_password or '')
+            kc_client_secret_q = shlex.quote(oc.kc_client_secret or '')
+            svc_user_q = shlex.quote(svc_user)
+            svc_pw_q = shlex.quote(svc_pw)
+            users_json_q = shlex.quote(users_json)
+            encryption_key_q = shlex.quote(encryption_key or '')
             print(" Creating orthanc-secrets...")
             cmd("minikube kubectl -- delete secret orthanc-secrets -n orthanc --ignore-not-found=true")
             cmd(
                 f"minikube kubectl -- create secret generic orthanc-secrets"
                 f" --namespace=orthanc"
-                f" --from-literal=AUTH_SECRET_KEY={oc.auth_secret_key}"
-                f" --from-literal=DB_ORTHANC_PASSWORD={oc.db_orthanc_password}"
-                f" --from-literal=DB_KEYCLOAK_PASSWORD={oc.db_keycloak_password}"
-                f" --from-literal=KC_ADMIN_USER={oc.kc_admin_user}"
-                f" --from-literal=KC_ADMIN_PASSWORD={oc.kc_admin_password}"
-                f" --from-literal=KC_CLIENT_SECRET={oc.kc_client_secret}"
-                f" --from-literal=SVC_INTERNAL_USER={svc_user}"
-                f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw}"
-                f" --from-literal=SVC_INTERNAL_USERS_JSON={shlex.quote(users_json)}"
-                f" --from-literal=patient-id-encryption-key={encryption_key}"
+                f" --from-literal=AUTH_SECRET_KEY={auth_secret_key_q}"
+                f" --from-literal=DB_ORTHANC_PASSWORD={db_orthanc_password_q}"
+                f" --from-literal=DB_KEYCLOAK_PASSWORD={db_keycloak_password_q}"
+                f" --from-literal=KC_ADMIN_USER={kc_admin_user_q}"
+                f" --from-literal=KC_ADMIN_PASSWORD={kc_admin_password_q}"
+                f" --from-literal=KC_CLIENT_SECRET={kc_client_secret_q}"
+                f" --from-literal=SVC_INTERNAL_USER={svc_user_q}"
+                f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw_q}"
+                f" --from-literal=SVC_INTERNAL_USERS_JSON={users_json_q}"
+                f" --from-literal=patient-id-encryption-key={encryption_key_q}"
             )
         else:
             print("  Warning: orthanc secrets not set in config, skipping orthanc-secrets creation")
@@ -3441,6 +3556,10 @@ def install_orthanc(CONFIG):
             with open("orthanc-cm.yaml", 'r') as _f:
                 _cm_content = _f.read()
             _cm_content = _cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
+            _orthanc_client_id = 'orthanc'
+            if oc and getattr(oc, 'kc_client_id', None):
+                _orthanc_client_id = oc.kc_client_id
+            _cm_content = _cm_content.replace("ORTHANC_KEYCLOAK_CLIENT_ID", _orthanc_client_id)
             with open("orthanc-cm.private.yaml", 'w') as _f:
                 _f.write(_cm_content)
             cmd("minikube kubectl -- apply -f orthanc-cm.private.yaml")
@@ -3455,10 +3574,32 @@ def install_orthanc(CONFIG):
                 _f.write(_deploy_content)
             cmd("minikube kubectl -- apply -f orthanc-deploy.private.yaml")
 
+            # Reconcile postgres password on existing persistent DBs so Orthanc can always reconnect
+            # after password changes in config.private.yaml.
+            if oc and oc.db_orthanc_password:
+                print(" Reconciling Orthanc DB password with configured secret...")
+                cmd("minikube kubectl -- wait --for=condition=available --timeout=180s deployment/orthanc-db -n orthanc || true")
+                sql_pw = (oc.db_orthanc_password or '').replace("'", "''")
+                sql_stmt = f"ALTER USER postgres WITH PASSWORD '{sql_pw}';"
+                cmd(
+                    f"minikube kubectl -- exec -n orthanc deploy/orthanc-db -- "
+                    f"psql -U postgres -d postgres -c {shlex.quote(sql_stmt)} || true"
+                )
+
+            # Ensure both services reload the current secret/config values.
+            # This avoids transient 401 errors between Orthanc and auth-service after updates.
+            print(" Restarting Orthanc auth-service and Orthanc to pick up updated secrets/config...")
+            cmd("minikube kubectl -- rollout restart deployment/orthanc-auth-service -n orthanc || true")
+            cmd("minikube kubectl -- wait --for=condition=available --timeout=180s deployment/orthanc-auth-service -n orthanc || true")
+            cmd("minikube kubectl -- rollout restart deployment/orthanc -n orthanc || true")
+            cmd("minikube kubectl -- wait --for=condition=available --timeout=180s deployment/orthanc -n orthanc || true")
+
         # Apply Ingress with domain substitution
+        # Delete first to avoid nginx admission webhook rejecting updates on existing host/path combos
         ingress_file = "orthanc-ingress.yaml"
         if os.path.exists(ingress_file):
             update_ingress_host(ingress_file, CONFIG.public_domain)
+            cmd("minikube kubectl -- delete ingress -n orthanc --all --ignore-not-found=true")
             cmd(f"minikube kubectl -- apply -f {ingress_file}")
             print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
         else:
@@ -3469,32 +3610,35 @@ def install_orthanc(CONFIG):
         print(" Setting up bindfs mounts on minikube node...")
         cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
 
-        # 1. /var/lib/orthanc on the host → actual orthanc storage (needed to resolve symlinks)
+        # 1. /var/lib/orthanc → actual orthanc storage (needed to resolve symlinks)
         cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
         cmd("minikube ssh -- '"
-            "grep -q \"/var/lib/orthanc \" /etc/fstab || "
+            "sudo sed -i \"/var\\/lib\\/orthanc/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
             "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " >> /etc/fstab'")
-        cmd("minikube ssh -- 'mount | grep -q \"/var/lib/orthanc\" || sudo mount /var/lib/orthanc/'")
+            " | sudo tee -a /etc/fstab > /dev/null'")
 
         # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
         cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake'")
         cmd("minikube ssh -- '"
-            "grep -q \"/mnt/datalake \" /etc/fstab || "
+            "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
             "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " >> /etc/fstab'")
-        cmd("minikube ssh -- 'mount | grep -q \"/mnt/datalake \" || sudo mount /mnt/datalake'")
+            " | sudo tee -a /etc/fstab > /dev/null'")
 
         # 3. /mnt/datasets → datasets (for desktops/jobman)
         cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
         cmd("minikube ssh -- '"
-            "grep -q \"/mnt/datasets \" /etc/fstab || "
+            "sudo sed -i \"/mnt\\/datasets/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/dataset-service/datasets"
             "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " >> /etc/fstab'")
-        cmd("minikube ssh -- 'mount | grep -q \"/mnt/datasets \" || sudo mount /mnt/datasets'")
+            " | sudo tee -a /etc/fstab > /dev/null'")
+
+        # Reload systemd so it sees the new fstab, then (re)mount all three
+        cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
+        cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
+        cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
+        cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
 
         print(f" Orthanc installation completed")
         print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
@@ -3507,7 +3651,7 @@ def install_clinical_data_sql_db():
     '''Install Clinical Data SQL DB - deploys PostgreSQL database for clinical data'''
     if CONFIG is None:
         raise Exception("CONFIG is None")
-    
+
     print(f"\n{'='*80}")
     print(" Installing Clinical Data SQL DB")
     print(f"{'='*80}\n")
@@ -3515,12 +3659,12 @@ def install_clinical_data_sql_db():
     prev_dir = os.getcwd()
     try:
         clinical_db_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "clinical-data-sql-db")
-        
+
         if not os.path.exists(clinical_db_dir):
             print(f"  Warning: clinical-data-sql-db directory not found at {clinical_db_dir}")
             print(f"  Skipping clinical-data-sql-db installation")
             return
-        
+
         os.chdir(clinical_db_dir)
 
         # Create namespace
@@ -3544,11 +3688,11 @@ def install_clinical_data_sql_db():
         if os.path.exists(db_service_file):
             print(f" Injecting PostgreSQL password from config into {db_service_file}...")
             result_db = update_postgres_password(db_service_file, CONFIG.postgres.db_password)
-            
+
             # Use the private file if it was created
             if result_db and isinstance(result_db, str):
                 db_service_file = result_db
-            
+
             # Apply database deployment and service
             print(f" Applying database deployment and service ({db_service_file})...")
             cmd(f"minikube kubectl -- apply -n clinical-data-sql-db -f {db_service_file}")
@@ -3753,7 +3897,6 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     if args.k8s:
-        global KUBECTL, USE_MINIKUBE
         KUBECTL = "kubectl"
         USE_MINIKUBE = False
         print("K8s mode enabled: using 'kubectl' instead of 'minikube kubectl --'")
