@@ -80,6 +80,29 @@ def cmd_output(command):
         return ""
 
 
+def wait_for_apiserver_ready(timeout_seconds=180, poll_interval_seconds=5,
+                             context_message="before applying manifests", warn_only=True):
+    '''Wait until Kubernetes API server responds with healthz=ok.'''
+    print(f" Waiting for kube-apiserver to be ready {context_message}...")
+    waited = 0
+    while waited < timeout_seconds:
+        api_ok = cmd_output(f"{KUBECTL} get --raw=/healthz 2>/dev/null").strip()
+        if api_ok == "ok":
+            print(" API server ready")
+            return True
+        time.sleep(poll_interval_seconds)
+        waited += poll_interval_seconds
+        if waited % 20 == 0:
+            print(f"   Still waiting for API server... ({waited}s)")
+
+    message = (f"kube-apiserver did not become ready within {timeout_seconds}s "
+               f"{context_message}")
+    if warn_only:
+        print(f"  Warning: {message}")
+        return False
+    raise RuntimeError(message)
+
+
 def generate_random_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choice(alphabet) for _ in range(length))
@@ -917,19 +940,7 @@ def install_dataset_service(auth_client_secret: str):
 
         # Apply resources
         # Ensure kube-apiserver is responsive before applying (it may have restarted for OIDC config)
-        print(f" Waiting for kube-apiserver to be ready before applying manifests...")
-        api_waited = 0
-        while api_waited < 120:
-            api_ok = cmd_output("minikube kubectl -- get --raw=/healthz 2>/dev/null").strip()
-            if api_ok == "ok":
-                print(f" API server ready")
-                break
-            time.sleep(5)
-            api_waited += 5
-            if api_waited % 20 == 0:
-                print(f"   Still waiting for API server... ({api_waited}s)")
-        else:
-            print(f"  Warning: API server may not be ready, proceeding anyway")
+        wait_for_apiserver_ready(timeout_seconds=120, context_message="before applying dataset-service manifests")
 
         cmd(f"minikube kubectl -- apply -f {db_service_file} -n dataset-service")
         cmd("minikube kubectl -- apply -f 0-service-account.yaml -n dataset-service")
@@ -1613,16 +1624,29 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
 
         # Create admin group and eucaim-user-creator user using guacli
         print(f" Creating Guacamole admin group and user-creator...")
-        _guac_url = shlex.quote(f"https://{CONFIG.public_domain}/guacamole/")
-        _guac_user = shlex.quote(adminUsername)
-        _guac_pass = shlex.quote(adminLocalPassword)
-        _creator_pass = shlex.quote(guacamole_user_creator_password)
-        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
-            f" create admin-group cloud-services-and-security-management", exit_on_error=False)
-        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
-            f" create admin-user eucaim-user-creator --new-user-password {_creator_pass}", exit_on_error=False)
-        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
-            f" create admin-user service-account-kubernetes-operator --new-user-password {_creator_pass}", exit_on_error=False)
+        guac_service_port = cmd_output(
+            "minikube kubectl -- get svc guacamole-guacamole -n guacamole -o jsonpath='{.spec.ports[0].port}'"
+        ).strip().strip("'") or "80"
+        guac_port_forward_pid = cmd_output(
+            "sh -c " + shlex.quote(
+                f"nohup minikube kubectl -- port-forward -n guacamole svc/guacamole-guacamole 18080:{guac_service_port} >/tmp/guacamole-port-forward.log 2>&1 & echo $!"
+            )
+        ).strip()
+        try:
+            time.sleep(5)
+            _guac_url = shlex.quote("http://127.0.0.1:18080/guacamole/")
+            _guac_user = shlex.quote(adminUsername)
+            _guac_pass = shlex.quote(adminLocalPassword)
+            _creator_pass = shlex.quote(guacamole_user_creator_password)
+            cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+                f" create admin-group cloud-services-and-security-management", exit_on_error=False)
+            cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+                f" create admin-user eucaim-user-creator --new-user-password {_creator_pass}", exit_on_error=False)
+            cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+                f" create admin-user service-account-kubernetes-operator --new-user-password {_creator_pass}", exit_on_error=False)
+        finally:
+            if guac_port_forward_pid:
+                cmd(f"kill {shlex.quote(guac_port_forward_pid)}", exit_on_error=False)
 
     finally:
         os.chdir(prev_dir)
@@ -1859,10 +1883,39 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         cmd("helm repo add chaimeleon-services https://harbor.chaimeleon-eu.i3m.upv.es/chartrepo/chaimeleon-services", exit_on_error=False)
         cmd("helm repo update chaimeleon-services", exit_on_error=False)
 
-        # Install or upgrade DSWS Operator
+        # Install or upgrade DSWS Operator (remote first, local fallback)
         print(f"\n Checking if DSWS Operator is already installed...")
-        cmd(f"helm upgrade --install dsws-operator chaimeleon-services/chaimeleon-operator "
-            f"--version 1.3.2 --namespace dsws-operator -f {values_file}")
+        remote_install_cmd = (
+            f"helm upgrade --install dsws-operator chaimeleon-services/chaimeleon-operator "
+            f"--version 1.3.2 --namespace dsws-operator -f {values_file}"
+        )
+
+        remote_install_ok = False
+        for attempt in range(1, 4):
+            if attempt > 1:
+                print(f" Retrying remote DSWS Operator install (attempt {attempt}/3)...")
+                cmd("helm repo update chaimeleon-services", exit_on_error=False)
+                time.sleep(5)
+
+            ret = cmd(remote_install_cmd, exit_on_error=False)
+            if ret == 0:
+                remote_install_ok = True
+                break
+
+        if not remote_install_ok:
+            local_chart_dir = os.path.join("k8s-chaimeleon-operator", "chaimeleon-operator-chart")
+            if os.path.exists(local_chart_dir):
+                print("  Warning: Remote chart installation failed (repository may be temporarily unavailable)")
+                print(f" Falling back to local chart: {local_chart_dir}")
+                cmd(
+                    f"helm upgrade --install dsws-operator ./{local_chart_dir} "
+                    f"--namespace dsws-operator -f {values_file}"
+                )
+            else:
+                raise RuntimeError(
+                    "DSWS Operator installation failed: remote chart unavailable and local fallback chart not found"
+                )
+
         print(f" DSWS Operator installed/upgraded successfully")
 
     finally:
@@ -1873,6 +1926,8 @@ def configure_kube_apiserver_oidc(CONFIG):
     print(f"\n{'='*80}")
     print(" Configuring kube-apiserver with OIDC")
     print(f"{'='*80}\n")
+
+    apiserver_manifest_changed = False
 
     # --- Token auth file setup ---
     # Generate token.csv from the user-management-sa-token k8s secret.
@@ -1918,7 +1973,11 @@ fi
         with open('/tmp/patch_token_auth.sh', 'w') as f:
             f.write(token_patch_script)
         cmd("minikube cp /tmp/patch_token_auth.sh minikube:/tmp/patch_token_auth.sh")
-        cmd("minikube ssh -- 'sudo bash /tmp/patch_token_auth.sh'")
+        token_patch_output = cmd_output("minikube ssh -- 'sudo bash /tmp/patch_token_auth.sh'")
+        if token_patch_output.strip():
+            print(token_patch_output.strip())
+        if "--token-auth-file added" in token_patch_output:
+            apiserver_manifest_changed = True
         print(" kube-apiserver patched with --token-auth-file")
 
     # OIDC configuration flags
@@ -1945,6 +2004,12 @@ fi
 
             if CONFIG.public_domain in current_domain:
                 print(f" kube-apiserver already configured with OIDC for {CONFIG.public_domain}")
+                if apiserver_manifest_changed:
+                    wait_for_apiserver_ready(
+                        timeout_seconds=180,
+                        context_message="after updating kube-apiserver --token-auth-file",
+                        warn_only=False,
+                    )
                 return
             else:
                 print(f" Updating kube-apiserver OIDC configuration to use {CONFIG.public_domain}")
@@ -1996,26 +2061,17 @@ echo "OIDC configuration applied successfully"
     cmd("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
 
     # Wait for apiserver to restart (it monitors the manifest file)
+    apiserver_manifest_changed = True
     print(" Waiting for kube-apiserver to restart with new configuration...")
     print("  (This may take 30-60 seconds)")
     time.sleep(10)
 
     # Wait for apiserver to be ready
-    max_wait = 180
-    waited = 0
-    while waited < max_wait:
-        result = cmd("minikube kubectl -- get --raw=/healthz 2>/dev/null", exit_on_error=False)
-        if result == 0:
-            print(f" kube-apiserver is ready with OIDC configuration")
-            break
-        time.sleep(5)
-        waited += 5
-        if waited % 15 == 0:
-            print(f"   Still waiting for apiserver... ({waited}s)")
-
-    if waited >= max_wait:
-        print(f"  Warning: apiserver took longer than expected to restart")
-        print(f"   You may need to check manually with: kubectl get pods -n kube-system")
+    if apiserver_manifest_changed:
+        wait_for_apiserver_ready(
+            timeout_seconds=180,
+            context_message="after kube-apiserver OIDC reconfiguration",
+        )
 
     # Verify OIDC configuration
     print("\n Verifying OIDC configuration...")
@@ -3508,47 +3564,104 @@ def install_orthanc(CONFIG):
             cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/{subdir}'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
 
+        wrapper_payload_available = (
+            cmd(
+                "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh'",
+                exit_on_error=False,
+            ) == 0
+        )
+        if not wrapper_payload_available:
+            print(
+                "  Warning: /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh is missing; "
+                "the Orthanc wrapper deployment will be skipped"
+            )
+
         # Apply PVs and PVCs
         if os.path.exists("orthanc-pvc.yaml"):
             print(" Applying Orthanc PVs and PVCs...")
             cmd("minikube kubectl -- apply -f orthanc-pvc.yaml")
 
         # Create orthanc-secrets from config (idempotent)
+        import base64 as _base64
         import json as _json
         oc = getattr(CONFIG, 'orthanc', None)
-        encryption_key = getattr(oc, 'patient_id_encryption_key', '')
-        if oc and oc.db_orthanc_password:
-            svc_user = oc.svc_internal_user or 'svc-internal'
-            svc_pw   = oc.svc_internal_password or ''
+        existing_secret_data = {}
+        existing_secret_json = cmd_output(
+            "minikube kubectl -- get secret orthanc-secrets -n orthanc -o json 2>/dev/null"
+        ).strip()
+        if existing_secret_json:
+            try:
+                existing_secret = _json.loads(existing_secret_json)
+                for key, value in (existing_secret.get('data') or {}).items():
+                    existing_secret_data[key] = _base64.b64decode(value).decode('utf-8')
+                print(" Reusing existing orthanc-secrets values for missing config fields")
+            except Exception as exc:
+                print(f"  Warning: could not parse existing orthanc-secrets: {exc}")
+
+        def _resolve_secret_value(attr_name, secret_key, default=''):
+            config_value = getattr(oc, attr_name, '') if oc else ''
+            if config_value:
+                return config_value
+            return existing_secret_data.get(secret_key, default)
+
+        auth_secret_key = _resolve_secret_value('auth_secret_key', 'AUTH_SECRET_KEY')
+        db_orthanc_password = _resolve_secret_value('db_orthanc_password', 'DB_ORTHANC_PASSWORD')
+        db_keycloak_password = _resolve_secret_value('db_keycloak_password', 'DB_KEYCLOAK_PASSWORD')
+        kc_admin_user = _resolve_secret_value('kc_admin_user', 'KC_ADMIN_USER', 'admin')
+        kc_admin_password = _resolve_secret_value('kc_admin_password', 'KC_ADMIN_PASSWORD')
+        kc_client_secret = _resolve_secret_value('kc_client_secret', 'KC_CLIENT_SECRET')
+        svc_user = _resolve_secret_value('svc_internal_user', 'SVC_INTERNAL_USER', 'svc-internal')
+        svc_pw = _resolve_secret_value('svc_internal_password', 'SVC_INTERNAL_PASSWORD')
+        encryption_key = _resolve_secret_value('patient_id_encryption_key', 'patient-id-encryption-key')
+
+        if (oc and (getattr(oc, 'svc_internal_user', '') or getattr(oc, 'svc_internal_password', ''))) or not existing_secret_data:
             users_json = _json.dumps({svc_user: svc_pw})
-            auth_secret_key_q = shlex.quote(oc.auth_secret_key or '')
-            db_orthanc_password_q = shlex.quote(oc.db_orthanc_password or '')
-            db_keycloak_password_q = shlex.quote(oc.db_keycloak_password or '')
-            kc_admin_user_q = shlex.quote(oc.kc_admin_user or '')
-            kc_admin_password_q = shlex.quote(oc.kc_admin_password or '')
-            kc_client_secret_q = shlex.quote(oc.kc_client_secret or '')
-            svc_user_q = shlex.quote(svc_user)
-            svc_pw_q = shlex.quote(svc_pw)
-            users_json_q = shlex.quote(users_json)
-            encryption_key_q = shlex.quote(encryption_key or '')
-            print(" Creating orthanc-secrets...")
-            cmd("minikube kubectl -- delete secret orthanc-secrets -n orthanc --ignore-not-found=true")
-            cmd(
-                f"minikube kubectl -- create secret generic orthanc-secrets"
-                f" --namespace=orthanc"
-                f" --from-literal=AUTH_SECRET_KEY={auth_secret_key_q}"
-                f" --from-literal=DB_ORTHANC_PASSWORD={db_orthanc_password_q}"
-                f" --from-literal=DB_KEYCLOAK_PASSWORD={db_keycloak_password_q}"
-                f" --from-literal=KC_ADMIN_USER={kc_admin_user_q}"
-                f" --from-literal=KC_ADMIN_PASSWORD={kc_admin_password_q}"
-                f" --from-literal=KC_CLIENT_SECRET={kc_client_secret_q}"
-                f" --from-literal=SVC_INTERNAL_USER={svc_user_q}"
-                f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw_q}"
-                f" --from-literal=SVC_INTERNAL_USERS_JSON={users_json_q}"
-                f" --from-literal=patient-id-encryption-key={encryption_key_q}"
-            )
         else:
-            print("  Warning: orthanc secrets not set in config, skipping orthanc-secrets creation")
+            users_json = existing_secret_data.get('SVC_INTERNAL_USERS_JSON', _json.dumps({svc_user: svc_pw}))
+
+        missing_secret_values = []
+        if not auth_secret_key:
+            missing_secret_values.append('orthanc.auth_secret_key')
+        if not db_orthanc_password:
+            missing_secret_values.append('orthanc.db_orthanc_password')
+        if not kc_client_secret:
+            missing_secret_values.append('orthanc.kc_client_secret')
+        if not svc_pw:
+            missing_secret_values.append('orthanc.svc_internal_password')
+
+        if missing_secret_values:
+            print("  Error: missing required Orthanc secret values:")
+            for key in missing_secret_values:
+                print(f"   - {key}")
+            print("  Skipping Orthanc deployment to avoid applying pods with missing secrets")
+            return
+
+        auth_secret_key_q = shlex.quote(auth_secret_key)
+        db_orthanc_password_q = shlex.quote(db_orthanc_password)
+        db_keycloak_password_q = shlex.quote(db_keycloak_password or '')
+        kc_admin_user_q = shlex.quote(kc_admin_user or '')
+        kc_admin_password_q = shlex.quote(kc_admin_password or '')
+        kc_client_secret_q = shlex.quote(kc_client_secret)
+        svc_user_q = shlex.quote(svc_user)
+        svc_pw_q = shlex.quote(svc_pw)
+        users_json_q = shlex.quote(users_json)
+        encryption_key_q = shlex.quote(encryption_key or '')
+        print(" Applying orthanc-secrets...")
+        cmd(
+            f"minikube kubectl -- create secret generic orthanc-secrets"
+            f" --namespace=orthanc"
+            f" --from-literal=AUTH_SECRET_KEY={auth_secret_key_q}"
+            f" --from-literal=DB_ORTHANC_PASSWORD={db_orthanc_password_q}"
+            f" --from-literal=DB_KEYCLOAK_PASSWORD={db_keycloak_password_q}"
+            f" --from-literal=KC_ADMIN_USER={kc_admin_user_q}"
+            f" --from-literal=KC_ADMIN_PASSWORD={kc_admin_password_q}"
+            f" --from-literal=KC_CLIENT_SECRET={kc_client_secret_q}"
+            f" --from-literal=SVC_INTERNAL_USER={svc_user_q}"
+            f" --from-literal=SVC_INTERNAL_PASSWORD={svc_pw_q}"
+            f" --from-literal=SVC_INTERNAL_USERS_JSON={users_json_q}"
+            f" --from-literal=patient-id-encryption-key={encryption_key_q}"
+            " --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+        )
 
         # Apply ConfigMap with domain substitution
         if os.path.exists("orthanc-cm.yaml"):
@@ -3570,9 +3683,38 @@ def install_orthanc(CONFIG):
             with open("orthanc-deploy.yaml", 'r') as _f:
                 _deploy_content = _f.read()
             _deploy_content = _deploy_content.replace("YOURDOMAIN", CONFIG.public_domain)
+            _deploy_docs = [doc for doc in yaml.safe_load_all(_deploy_content) if doc]
+            # Avoid TLS trust issues with self-signed ingress certs by using in-cluster Keycloak URL.
+            for _doc in _deploy_docs:
+                if _doc.get('kind') == 'Deployment' and _doc.get('metadata', {}).get('name') == 'orthanc-auth-service':
+                    _containers = _doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', [])
+                    for _container in _containers:
+                        if _container.get('name') != 'auth-service':
+                            continue
+                        for _env in _container.get('env', []):
+                            if _env.get('name') == 'KEYCLOAK_URI':
+                                _env['value'] = "http://keycloak.keycloak.svc.cluster.local:8080/auth/realms/EUCAIM-NODE/"
+                                break
+            if not wrapper_payload_available:
+                _deploy_docs = [
+                    doc for doc in _deploy_docs
+                    if doc.get('metadata', {}).get('name') not in ('orthanc-wrapper', 'orthanc-wrapper-service')
+                ]
             with open("orthanc-deploy.private.yaml", 'w') as _f:
-                _f.write(_deploy_content)
+                yaml.safe_dump_all(_deploy_docs, _f, sort_keys=False)
             cmd("minikube kubectl -- apply -f orthanc-deploy.private.yaml")
+
+            # Force runtime env as an extra safety net in case an older manifest
+            # or manual edit left KEYCLOAK_URI pointing to external HTTPS.
+            _internal_keycloak_uri = "http://keycloak.keycloak.svc.cluster.local:8080/auth/realms/EUCAIM-NODE/"
+            print(" Enforcing internal KEYCLOAK_URI on orthanc-auth-service...")
+            _set_env_ret = cmd(
+                "minikube kubectl -- -n orthanc set env deployment/orthanc-auth-service "
+                f"KEYCLOAK_URI={_internal_keycloak_uri}",
+                exit_on_error=False,
+            )
+            if _set_env_ret != 0:
+                print("  Warning: could not enforce KEYCLOAK_URI via set env; deployment may still use old value")
 
             # Reconcile postgres password on existing persistent DBs so Orthanc can always reconnect
             # after password changes in config.private.yaml.
@@ -3598,9 +3740,18 @@ def install_orthanc(CONFIG):
         # Delete first to avoid nginx admission webhook rejecting updates on existing host/path combos
         ingress_file = "orthanc-ingress.yaml"
         if os.path.exists(ingress_file):
-            update_ingress_host(ingress_file, CONFIG.public_domain)
+            with open(ingress_file, 'r') as _f:
+                _ingress_content = _f.read().replace("YOURDOMAIN", CONFIG.public_domain)
+            _ingress_docs = [doc for doc in yaml.safe_load_all(_ingress_content) if doc]
+            if not wrapper_payload_available:
+                _ingress_docs = [
+                    doc for doc in _ingress_docs
+                    if doc.get('metadata', {}).get('name') != 'orthanc-wrapper-ingress'
+                ]
+            with open("orthanc-ingress.private.yaml", 'w') as _f:
+                yaml.safe_dump_all(_ingress_docs, _f, sort_keys=False)
             cmd("minikube kubectl -- delete ingress -n orthanc --all --ignore-not-found=true")
-            cmd(f"minikube kubectl -- apply -f {ingress_file}")
+            cmd("minikube kubectl -- apply -f orthanc-ingress.private.yaml")
             print(f" Applied Ingress for Orthanc with domain: {CONFIG.public_domain}")
         else:
             print(f"  Warning: {ingress_file} not found")
@@ -3666,6 +3817,14 @@ def install_clinical_data_sql_db():
             return
 
         os.chdir(clinical_db_dir)
+
+        # If kube-apiserver just restarted (for example after OIDC/token-auth changes),
+        # wait here to avoid transient "connection refused" errors.
+        wait_for_apiserver_ready(
+            timeout_seconds=180,
+            context_message="before installing clinical-data-sql-db",
+            warn_only=False,
+        )
 
         # Create namespace
         print(" Creating clinical-data-sql-db namespace...")
