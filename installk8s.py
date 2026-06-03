@@ -3616,7 +3616,7 @@ def install_orthanc(CONFIG):
                 _deploy_content = _f.read()
             _deploy_content = _deploy_content.replace("YOURDOMAIN", CONFIG.public_domain)
             _deploy_docs = [doc for doc in yaml.safe_load_all(_deploy_content) if doc]
-            _forced_keycloak_uri = "http://keycloak.keycloak.svc.cluster.local:8080/keycloak/realms/EUCAIM-NODE/"
+            _forced_keycloak_uri = "http://keycloak.keycloak.svc.cluster.local:8080/auth/realms/EUCAIM-NODE/"
             for _doc in _deploy_docs:
                 if _doc.get('kind') == 'Deployment' and _doc.get('metadata', {}).get('name') == 'orthanc-auth-service':
                     for _container in _doc.get('spec', {}).get('template', {}).get('spec', {}).get('containers', []):
