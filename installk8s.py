@@ -1362,7 +1362,7 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         else:
             raise ValueError("Missing 'guacamole.password' in config.private.yaml — please set it before running the installer")
         database = "guacamole"
-        adminUsername = "guacamole-admin"
+        adminUsername = username
         if hasattr(CONFIG, 'guacamole') and CONFIG.guacamole.admin_password:
             adminLocalPassword = CONFIG.guacamole.admin_password
         else:
@@ -1655,7 +1655,7 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         print(f"  Warning: Could not retrieve ADMIN_PASSWORD from guacamole container, falling back to provided password")
         guacamole_admin_password = guacamole_user_creator_password
     else:
-        print(f" Guacamole admin password retrieved successfully (user: guacamole-admin)")
+        print(" Guacamole admin password retrieved successfully")
 
     # Get K8S service account token (we'll create a service account for this)
     print(f" Creating service account for user management jobs...")
@@ -2211,12 +2211,38 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         # Wait a moment for the StatefulSet to be fully deleted
         cmd("sleep 5")
 
+        # AppRepository can conflict with apprepository-controller field ownership
+        # on upgrade; deleting it allows Helm to recreate it cleanly.
+        print(f" Removing potentially conflicting AppRepository before Helm upgrade...")
+        cmd(
+            "minikube kubectl -- delete apprepository eucaim-node-apps "
+            "-n kubeapps --ignore-not-found=true",
+            exit_on_error=False,
+        )
+
         # Use helm upgrade --install to install or update Kubeapps
         # --install: Install if not already installed
         # Note: --force is intentionally omitted; it conflicts with server-side apply in newer Helm versions.
         # Pod recreation is handled explicitly below instead.
-        cmd("helm upgrade --install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps "
-            "--version 17.1.1 --namespace kubeapps -f {}".format(private_values_file))
+        helm_cmd = (
+            "helm upgrade --install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps "
+            "--version 17.1.1 --namespace kubeapps -f {}".format(private_values_file)
+        )
+        helm_ret = cmd(helm_cmd, exit_on_error=False)
+        if helm_ret != 0:
+            print("  First Helm upgrade failed; retrying after AppRepository cleanup...")
+            cmd(
+                "minikube kubectl -- delete apprepository eucaim-node-apps "
+                "-n kubeapps --ignore-not-found=true",
+                exit_on_error=False,
+            )
+            cmd("sleep 3")
+            helm_ret = cmd(helm_cmd, exit_on_error=False)
+            if helm_ret != 0:
+                print("  ERROR: Kubeapps Helm upgrade failed after retry")
+                print("   Check details with: helm -n kubeapps status kubeapps")
+                print("   And: minikube kubectl -- get apprepository -n kubeapps -o yaml")
+                exit(1)
 
         print(f"\n Forcing Kubeapps frontend pod recreation to apply new secrets...")
         # Delete the main Kubeapps pod to force recreation with new clientSecret
@@ -3476,11 +3502,28 @@ def apply_pod_priorities():
         "processing-applications.yml"
     ]
 
+    # Wait for API server to be reachable before applying (it may be restarting after OIDC config)
+    print(" Waiting for kube-apiserver to be ready...")
+    api_waited = 0
+    while api_waited < 120:
+        api_ok = cmd_output("minikube kubectl -- get --raw=/healthz 2>/dev/null").strip()
+        if api_ok == "ok":
+            print(f" API server ready")
+            break
+        time.sleep(5)
+        api_waited += 5
+        if api_waited % 20 == 0:
+            print(f"   Still waiting for API server... ({api_waited}s)")
+    else:
+        print(f"  Warning: API server may not be ready, proceeding anyway")
+
     for priority_file in priority_files:
         file_path = os.path.join(priorities_dir, priority_file)
         if os.path.exists(file_path):
             print(f" Applying {priority_file}...")
-            cmd(f"minikube kubectl -- apply -f {file_path}")
+            # --validate=false avoids a remote openapi fetch that fails when the API
+            # server has just restarted (e.g. after OIDC reconfiguration).
+            cmd(f"minikube kubectl -- apply --validate=false -f {file_path}", exit_on_error=False)
         else:
             print(f"  Warning: {priority_file} not found, skipping")
 
@@ -3508,26 +3551,45 @@ def install_orthanc(CONFIG):
             cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/{subdir}'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
 
-        # Populate orthanc-wrapper payload from repo path (same pattern as other k8s-deploy-node dirs).
-        wrapper_source_dir = os.path.join(orthanc_dir, "wrapper")
-        if os.path.isdir(wrapper_source_dir) and os.path.isfile(os.path.join(wrapper_source_dir, "init_node.sh")):
-            print(f" Found orthanc-wrapper payload source: {wrapper_source_dir}")
-            wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
-            cmd(f"tar -czf {wrapper_tar} -C {shlex.quote(wrapper_source_dir)} .")
-            cmd(f"minikube cp {wrapper_tar} minikube:/tmp/orthanc-wrapper-seed.tar.gz")
+        # Populate orthanc-wrapper payload from fixed tar file in repo.
+        # Expected input: k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz
+        wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
+        wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
+
+        if os.path.isfile(wrapper_repo_tar):
+            print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
+            cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
             cmd(
                 "minikube ssh -- '"
-                "sudo mkdir -p /var/hostpath-provisioner/orthanc/orthanc-wrapper && "
-                "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C /var/hostpath-provisioner/orthanc/orthanc-wrapper && "
-                "sudo chmod +x /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh 2>/dev/null || true && "
-                "sudo chmod +x /var/hostpath-provisioner/orthanc/orthanc-wrapper/restart_node_server.sh 2>/dev/null || true && "
-                "sudo chmod +x /var/hostpath-provisioner/orthanc/orthanc-wrapper/update_app.sh 2>/dev/null || true && "
-                "sudo chmod -R 755 /var/hostpath-provisioner/orthanc/orthanc-wrapper'"
+                "set -e; "
+                "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
+                "TMP=/tmp/orthanc-wrapper-seed-unpack; "
+                "sudo mkdir -p $TARGET; "
+                "sudo rm -rf $TMP; "
+                "sudo mkdir -p $TMP; "
+                "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
+                "if [ -f $TMP/init_node.sh ]; then "
+                "  SRC=$TMP; "
+                "elif [ -f $TMP/wrapper/init_node.sh ]; then "
+                "  SRC=$TMP/wrapper; "
+                "else "
+                "  FOUND=$(sudo find $TMP -maxdepth 4 -type f -name init_node.sh | head -n1); "
+                "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
+                "fi; "
+                "sudo rm -rf $TARGET/*; "
+                "sudo cp -a $SRC/. $TARGET/; "
+                "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
+                "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
+                "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
+                "sudo chmod -R 755 $TARGET'"
             )
             cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
-            cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz'", exit_on_error=False)
+            cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
         else:
-            print("  Warning: orthanc-wrapper payload not found at k8s-deploy-node/orthanc/wrapper")
+            print(
+                "  Warning: orthanc-wrapper payload not found. "
+                "Expected k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz"
+            )
 
         wrapper_payload_available = (
             cmd(
@@ -3540,6 +3602,43 @@ def install_orthanc(CONFIG):
                 "  Warning: /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh is missing; "
                 "orthanc-wrapper deployment will be skipped"
             )
+        else:
+            print(" Ensuring Orthanc wrapper Node/Meteor runtime dependencies are installed...")
+            wrapper_dep_ret = cmd(
+                "minikube ssh -- '"
+                "WRAPPER_DIR=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
+                "SERVER_DIR=$WRAPPER_DIR/bundle/programs/server; "
+                "if [ -f \"$SERVER_DIR/package.json\" ]; then "
+                "if ! command -v npm >/dev/null 2>&1; then "
+                "echo \"npm not found on minikube node, installing nodejs/npm...\"; "
+                "sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm; "
+                "fi; "
+                "cd \"$SERVER_DIR\" && "
+                "if [ -f package-lock.json ]; then "
+                "npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund; "
+                "else "
+                "npm install --omit=dev --no-audit --no-fund; "
+                "fi && "
+                "npm install --no-save --no-audit --no-fund @meteorjs/reify && "
+                "node -e 'require(\"@meteorjs/reify/lib/runtime\"); console.log(\"reify-ok\")'; "                "else "
+                "echo \"WARN: $SERVER_DIR/package.json not found, skipping wrapper dependency bootstrap\"; "
+                "fi'",
+                exit_on_error=False,
+            )
+            if wrapper_dep_ret != 0:
+                print(
+                    "  Warning: could not auto-install orthanc-wrapper dependencies in minikube; "
+                    "wrapper pod may fail until dependencies are installed manually"
+                )
+            runtime_check_ret = cmd(
+                "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/bundle/programs/server/node_modules/@meteorjs/reify/lib/runtime.js'",
+                exit_on_error=False,
+            )
+            if runtime_check_ret != 0:
+                print(
+                    "  Warning: @meteorjs/reify runtime not found after bootstrap; "
+                    "orthanc-wrapper may still fail with missing module errors"
+                )
 
         # Ensure Lua script file exists when ORTHANC_JSON references /var/lib/orthanc/scripts/script.lua.
         # Without this file, Orthanc fails at startup with E0601.
