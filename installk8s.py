@@ -740,7 +740,7 @@ def create_dataset_service_pvcs():
     '''Create PVCs for dataset-service by applying the canonical 0-pvcs.yaml only.'''
     print("  Applying dataset-service PVC manifest (0-pvcs-hostpath.yaml) ...")
 
-    pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs-hostpath.yaml")
+    pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
     # Ensure namespace exists
     cmd("minikube kubectl -- create namespace dataset-service || true")
 
