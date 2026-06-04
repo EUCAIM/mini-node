@@ -238,11 +238,8 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     cmd("minikube kubectl -- create priorityclass core-services --value=1000 --description='Priority class for core services' || true")
     cmd("minikube kubectl -- create priorityclass core-applications --value=900 --description='Priority class for core applications' || true")
 
-    cmd("minikube ssh -- 'sudo rm -rf /var/hostpath-provisioner/keycloak'")
-    cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data'")
-    cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/keycloak/themes-data'")
-    cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/keycloak/standalone-deployments'")
-    cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/keycloak/'")
+    cmd("minikube ssh -- 'sudo rm -f /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
+
     cmd("sleep 10")
 
     update_postgres_password("dep2_database.yaml", CONFIG.keycloak.db_password)
