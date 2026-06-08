@@ -3696,6 +3696,8 @@ def install_orthanc(CONFIG):
             with open("orthanc-cm.yaml", 'r') as _f:
                 _cm_content = _f.read()
             _cm_content = _cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
+            _cm_content = _cm_content.replace("ORTHANC_NODE_NAME", CONFIG.orthanc.node_name)
+
             _orthanc_client_id = 'orthanc'
             if oc and getattr(oc, 'kc_client_id', None):
                 _orthanc_client_id = oc.kc_client_id
