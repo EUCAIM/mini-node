@@ -3526,7 +3526,6 @@ def apply_pod_priorities():
 
     print(f" Pod priority classes applied successfully")
 
-
 def install_orthanc(CONFIG):
     '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
     print(f"\n{'='*80}")
@@ -3796,22 +3795,19 @@ def install_orthanc(CONFIG):
             "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
             " | sudo tee -a /etc/fstab > /dev/null'")
 
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datalake/storage_link'")
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/datasets'")
-
-        # Reload systemd so it sees the new fstab, then (re)mount all three.
-        # Use || true so a mount failure (e.g. source empty at install time) does not abort the script.
+        # Reload systemd so it sees the new fstab, then (re)mount all three
         cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
-        cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc || true'")
-        cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake || true'")
-        cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets || true'")
-
+        cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
+        cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
+        cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
 
         print(f" Orthanc installation completed")
         print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
 
     finally:
         os.chdir(prev_dir)
+
+
 
 
 def install_clinical_data_sql_db():
