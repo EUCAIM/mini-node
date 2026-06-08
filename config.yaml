@@ -43,6 +43,7 @@ oidc:
   redirect_uri: "https://[]/guacamole/"
   username_claim_type: "preferred_username"
   groups_claim_type: "groups"
+  node_name: "your_node_name"
 
 orthanc:
   patient_id_encryption_key: "your_secret_encryption_key_here"
@@ -57,6 +58,7 @@ orthanc:
   svc_internal_user: "svc-internal"
   svc_internal_password: "tupassword_svc"
   auth_secret_key: "una_clave_larga_aleatoria_de_al_menos_32_chars"
+  node_name: "your_node_name"
 
 letsencrypt:
   email: "admin@i3m.upv.es"

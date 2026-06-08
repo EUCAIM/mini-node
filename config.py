@@ -150,6 +150,7 @@ class Config:
             self.kc_admin_password         = oc.get('kc_admin_password')
             self.svc_internal_user         = oc.get('svc_internal_user', 'svc-internal')
             self.svc_internal_password     = oc.get('svc_internal_password')
+            self.node_name                 = oc.get('node_name', 'orthanc-node')
 
     class Focus:
         def __init__(self, fc: dict):
