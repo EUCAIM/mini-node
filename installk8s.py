@@ -1097,6 +1097,15 @@ def install_dataset_explorer(CONFIG):
                 if old_name != "EUCAIM-NODE":
                     print(f" Fixed project name: '{old_name}' → 'EUCAIM-NODE'")
 
+                # Ensure termsConditions and privacyPolicy use the configured domain
+                for key in ("termsConditions", "privacyPolicy"):
+                    old_url = config_data["project"].get(key, "")
+                    if old_url:
+                        new_url = re.sub(r'https?://[^/]+', f'https://{domain}', old_url)
+                        if new_url != old_url:
+                            config_data["project"][key] = new_url
+                            print(f" Fixed project.{key}: '{old_url}' → '{new_url}'")
+
             # Replace any qpinsights link/icon with orthanc in externalServices
             # APLICAR PVC Y quitar el NAMESPACE ORTHANC-OHIF
             # 
