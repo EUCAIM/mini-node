@@ -99,6 +99,42 @@ if _guac_pw_loaded:
 else:
     guacamole_user_creator_password = generate_random_password(24)
 
+## TLS secret backup path (persisted across minikube delete)
+_TLS_BACKUP_FILE = os.path.join(SCRIPT_DIR, "mininode-tls-backup.yaml")
+_TLS_SECRET_NAME = "mininode-tls"
+
+def save_tls_secret():
+    for ns in ("keycloak", "default", "cert-manager"):
+        exists = os.system(f"{KUBECTL} get secret {_TLS_SECRET_NAME} -n {ns} -o name > /dev/null 2>&1") >> 8
+        if exists == 0:
+            break
+    else:
+        print(f" TLS secret {_TLS_SECRET_NAME} not found, skipping backup")
+        return
+    print(f" Found {_TLS_SECRET_NAME} in namespace {ns}, saving...")
+    saved = os.system(f"{KUBECTL} get secret {_TLS_SECRET_NAME} -n {ns} -o yaml > {_TLS_BACKUP_FILE}") >> 8
+    if saved == 0 and os.path.getsize(_TLS_BACKUP_FILE) > 0:
+        print(f" TLS secret saved to {_TLS_BACKUP_FILE}")
+    else:
+        print(f" Failed to save TLS secret")
+
+def restore_tls_secret():
+    if not os.path.exists(_TLS_BACKUP_FILE) or os.path.getsize(_TLS_BACKUP_FILE) == 0:
+        return False
+    print(f" Found existing TLS backup, restoring secret...")
+    # Validate it's valid YAML before applying
+    try:
+        with open(_TLS_BACKUP_FILE) as f:
+            content = f.read()
+            if not content.strip():
+                return False
+    except:
+        return False
+    ret = cmd(f"{KUBECTL} apply -f {_TLS_BACKUP_FILE}", exit_on_error=False)
+    if ret == 0:
+        print(" TLS secret restored from backup")
+        return True
+    return False
 
 ## Update YAML files
 def update_yaml_config(file_path, update_func):
@@ -594,9 +630,6 @@ def create_main_gateway(domain: str, use_tls: bool = True):
     print(f" Creating main Gateway for domain: {domain}")
     print("="*80 + "\n")
 
-    # Sanitize domain for secret name (replace dots with dashes)
-    secret_name = domain.replace('.', '-') + '-tls'
-
     gateway_yaml = (
         "apiVersion: gateway.networking.k8s.io/v1\n"
         "kind: Gateway\n"
@@ -625,11 +658,27 @@ def create_main_gateway(domain: str, use_tls: bool = True):
             "        mode: Terminate\n"
             "        certificateRefs:\n"
             "          - kind: Secret\n"
-            f"            name: {secret_name}\n"
+            f"            name: {_TLS_SECRET_NAME}\n"
             "            namespace: default\n"
             "      allowedRoutes:\n"
             "        namespaces:\n"
             "          from: All\n"
+        )
+        gateway_yaml += (
+            "---\n"
+            "apiVersion: cert-manager.io/v1\n"
+            "kind: Certificate\n"
+            "metadata:\n"
+            f"  name: {_TLS_SECRET_NAME}-cert\n"
+            "  namespace: default\n"
+            "spec:\n"
+            f"  secretName: {_TLS_SECRET_NAME}\n"
+            "  commonName: " + domain + "\n"
+            "  dnsNames:\n"
+            f"    - {domain}\n"
+            "  issuerRef:\n"
+            "    name: letsencrypt-prod\n"
+            "    kind: ClusterIssuer\n"
         )
 
     # Write to temp file and apply
@@ -723,10 +772,6 @@ def update_ingress_host(ingress_file: str, domain: str):
         rf'\1"{domain}"',
         content
     )
-
-    # Replace TLS secretName lines (simple, conservative replacement)
-    # This will replace any 'secretName: <value>' with the configured domain string.
-    content = re.sub(r'(^\s*secretName:\s*)([A-Za-z0-9._-]+)', rf'\1{domain}', content, flags=re.MULTILINE)
 
     with open(ingress_file, 'w') as f:
         f.write(content)
@@ -1431,12 +1476,11 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
                     hosts[0]['host'] = CONFIG.public_domain
                     print(f"Updated Guacamole ingress host to: {CONFIG.public_domain}")
 
-                # Update TLS hosts/secretName if present
+                # Update TLS hosts if present; secretName is always fixed
                 if 'tls' in data_pg['ingress']:
                     for tls_entry in data_pg['ingress']['tls']:
                         tls_entry['hosts'] = [CONFIG.public_domain]
-                    if tls_entry.get('secretName'):
-                        tls_entry['secretName'] = CONFIG.public_domain
+                        tls_entry['secretName'] = _TLS_SECRET_NAME
 
         # Write a private guacamole values file without altering image fields
         with open(guacamole_values_private_file, 'w') as f:
@@ -2079,10 +2123,9 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
                 if use_tls:
                     if 'tls' not in data['ingress']:
                         data['ingress']['tls'] = True
-                    secret_name = CONFIG.public_domain.replace('.', '-') + '-tls'
                     data['ingress']['extraTls'] = [{
                         'hosts': [CONFIG.public_domain],
-                        'secretName': secret_name
+                        'secretName': _TLS_SECRET_NAME
                     }]
                     print(f" Configured Helm-managed Ingress with TLS: {CONFIG.public_domain}")
                 else:
@@ -2899,11 +2942,27 @@ def create_main_gateway(domain: str, use_tls: bool = True):
             "        mode: Terminate\n"
             "        certificateRefs:\n"
             "          - kind: Secret\n"
-            f"            name: {domain.replace('.', '-')}-tls\n"
+            f"            name: {_TLS_SECRET_NAME}\n"
             "            namespace: default\n"
             "      allowedRoutes:\n"
             "        namespaces:\n"
             "          from: All\n"
+        )
+        gateway_yaml += (
+            "---\n"
+            "apiVersion: cert-manager.io/v1\n"
+            "kind: Certificate\n"
+            "metadata:\n"
+            f"  name: {_TLS_SECRET_NAME}-cert\n"
+            "  namespace: default\n"
+            "spec:\n"
+            f"  secretName: {_TLS_SECRET_NAME}\n"
+            "  commonName: " + domain + "\n"
+            "  dnsNames:\n"
+            f"    - {domain}\n"
+            "  issuerRef:\n"
+            "    name: letsencrypt-prod\n"
+            "    kind: ClusterIssuer\n"
         )
 
     # Write to temp file and apply
@@ -3919,13 +3978,19 @@ def install(flavor):
     # Create iptables rules for external access
     create_iptables_rules_script()
 
-    # Install cert-manager (needed for TLS certificates)
-    cert_manager_available = install_cert_manager(CONFIG)
+    # Try to restore TLS secret from backup (survives minikube delete)
+    tls_restored = restore_tls_secret()
 
-    # Store cert-manager availability for service configurations
-    CONFIG.cert_manager_available = cert_manager_available
-    if not cert_manager_available:
-        print("Note: Services will be configured for HTTP-only access")
+    if tls_restored:
+        cert_manager_available = True
+        CONFIG.cert_manager_available = True
+        print(" Skipping cert-manager install (using restored TLS secret)")
+    else:
+        # Install cert-manager (needed for TLS certificates)
+        cert_manager_available = install_cert_manager(CONFIG)
+        CONFIG.cert_manager_available = cert_manager_available
+        if not cert_manager_available:
+            print("Note: Services will be configured for HTTP-only access")
 
     # Create main Gateway if using Gateway API (after cert-manager is available)
     if use_gateway_api:
@@ -3938,6 +4003,10 @@ def install(flavor):
                 print("Falling back to programmatic Gateway creation...")
                 use_tls = hasattr(CONFIG, 'letsencrypt') and CONFIG.letsencrypt.email
                 create_main_gateway(domain=CONFIG.public_domain, use_tls=use_tls)
+
+            # Save TLS secret for future reinstalls
+            if not tls_restored:
+                save_tls_secret()
         else:
             print("Warning: Gateway API requested but cert-manager not available")
             print("  Gateway API requires cert-manager for TLS certificates")
@@ -4040,6 +4109,10 @@ def install(flavor):
             print(f"   1. Check Keycloak JWKS: curl -k https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/certs")
             print("   2. Find the RS256 key's 'kid' value")
             print("   3. Update the dataset-service deployment with the correct kid")
+
+    # Save TLS secret for future reinstalls (survives minikube delete)
+    if getattr(CONFIG, 'cert_manager_available', False):
+        save_tls_secret()
 
     print(f"\n{'='*80}")
     print(f" Installation completed successfully!")
