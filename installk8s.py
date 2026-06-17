@@ -3704,17 +3704,17 @@ def install_orthanc(CONFIG):
                     "orthanc-wrapper may still fail with missing module errors"
                 )
 
-        # Ensure Lua script file exists when ORTHANC_JSON references /var/lib/orthanc/scripts/script.lua.
-        # Without this file, Orthanc fails at startup with E0601.
-        cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/orthanc-storage/scripts'")
-        cmd(
-            "minikube ssh -- '"
-            "if [ ! -f /var/hostpath-provisioner/orthanc/orthanc-storage/scripts/script.lua ]; then "
-            "echo -- Placeholder Lua hook for Orthanc startup | "
-            "sudo tee /var/hostpath-provisioner/orthanc/orthanc-storage/scripts/script.lua >/dev/null; "
-            "fi; "
-            "sudo chmod 644 /var/hostpath-provisioner/orthanc/orthanc-storage/scripts/script.lua'"
-        )
+        # Copy Lua script from repo into the host-path for Orthanc
+        script_source = os.path.join(orthanc_dir, "scripts", "script.lua")
+        script_dest = os.path.join(CONFIG.host_path, "orthanc", "orthanc-storage", "scripts", "script.lua")
+        if os.path.exists(script_source):
+            print(f" Copying script.lua to {script_dest}...")
+            cmd(f"sudo mkdir -p {shlex.quote(os.path.dirname(script_dest))}")
+            cmd(f"sudo cp {shlex.quote(script_source)} {shlex.quote(script_dest)}")
+            cmd(f"sudo chmod 644 {shlex.quote(script_dest)}")
+            print(f" script.lua copied successfully")
+        else:
+            print(f"  Warning: script.lua not found at {script_source}, Orthanc may fail at startup")
 
         # Apply PVs and PVCs
         if os.path.exists("orthanc-pvc.yaml"):
