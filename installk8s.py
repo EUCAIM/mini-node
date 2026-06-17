@@ -1106,19 +1106,18 @@ def install_dataset_explorer(CONFIG):
                             config_data["project"][key] = new_url
                             print(f" Fixed project.{key}: '{old_url}' → '{new_url}'")
 
-            # Replace any qpinsights link/icon with orthanc in externalServices
-            # APLICAR PVC Y quitar el NAMESPACE ORTHANC-OHIF
-            # 
-            if "externalServices" in config_data:
-                for service in config_data["externalServices"]:
-                    if "qpinsights" in service.get("link", "").lower():
-                        old_link = service["link"]
-                        service["link"] = re.sub(r'(https?://[^/]+)/qpinsights[^\s"]*', rf'\1/orthanc/ui/app/index.html#/', old_link)
-                        print(f" Fixed externalService link: '{old_link}' → '{service['link']}'")
-                    if "quibim" in service.get("icon", "").lower():
-                        old_icon = service["icon"]
-                        service["icon"] = "/icons/orthanc.png"
-                        print(f" Fixed externalService icon: '{old_icon}' → '/icons/orthanc.png'")
+            # Replace any qpinsights link/icon with orthanc in externalServices and caseExplorer
+            for service in list(config_data.get("externalServices", [])) + [config_data.get("caseExplorer")]:
+                if not service:
+                    continue
+                if "qpinsights" in service.get("link", "").lower():
+                    old_link = service["link"]
+                    service["link"] = re.sub(r'(https?://[^/]+)/qpinsights[^\s"]*', rf'\1/orthanc/ui/app/index.html#/', old_link)
+                    print(f" Fixed {service.get('link', old_link)}: '{old_link}' → '{service['link']}'")
+                if "quibim" in service.get("icon", "").lower():
+                    old_icon = service["icon"]
+                    service["icon"] = "/icons/orthanc.png"
+                    print(f" Fixed {service.get('name', 'entry')} icon: '{old_icon}' → '/icons/orthanc.png'")
 
             # Write updated config back to config-mini-node.json
             with open(config_file, 'w') as f:
