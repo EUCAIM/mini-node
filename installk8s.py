@@ -3850,7 +3850,7 @@ def install_orthanc(CONFIG):
             " | sudo tee -a /etc/fstab > /dev/null'")
 
         # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
-        cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake'")
+        cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/dataset-service/datalake/storage_link'")
         cmd("minikube ssh -- '"
             "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
             "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
