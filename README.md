@@ -114,18 +114,12 @@ Some repositories must be cloned manually before running the installation:
 
 ## Installation Steps
 
-The script supports two deployment targets, selected via the `--release` flag:
+The script supports the deployment on Kubernetes, selected via the `--k8s` flag:
 
 | Flag | Target | kubectl command used |
 |---|---|---|
-| `--release minikube` *(default)* | Minikube single-node VM | `minikube kubectl --` |
-| `--release kubernetes` | Production Kubernetes cluster | `kubectl` |
+| `--k8s` | Production Kubernetes cluster | `kubectl` |
 
-In `--release kubernetes` mode the following minikube-specific steps are **skipped automatically**:
-- Minikube ingress addon management
-- kube-apiserver OIDC patching (done via SSH into the minikube VM)
-- iptables rules for NodePort exposure
-- kube-apiserver crash detection and repair
 
 ---
 
@@ -160,7 +154,7 @@ In `--release kubernetes` mode the following minikube-specific steps are **skipp
    
 2. **Run the installation**
    ```bash
-   python3 install.py <flavor> --release kubernetes
+   python3 install.py <flavor> --k8s
    ```
 
    > **Note:** OIDC configuration for the Kubernetes API server and firewall rules
