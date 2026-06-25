@@ -3991,8 +3991,11 @@ def install(flavor):
     # Apply RBAC roles and bindings
     apply_roles_and_bindings()
 
-    # Create iptables rules for external access
-    create_iptables_rules_script()
+    # Create iptables rules for external access (only relevant for minikube)
+    if USE_MINIKUBE:
+        create_iptables_rules_script()
+    else:
+        print("Skipping iptables rules (K8s mode)")
 
     # Try to restore TLS secret from backup (survives minikube delete)
     tls_restored = restore_tls_secret()
