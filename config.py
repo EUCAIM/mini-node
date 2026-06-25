@@ -159,6 +159,7 @@ class Config:
             self.dataset_service_auth_header = fc.get('dataset_service_auth_header', '')
             self.beam_broker_url = fc.get('beam_broker_url', 'https://broker.eucaim.cancerimage.eu')
             self.root_crt_pem = fc.get('root_crt_pem', '')
+            self.proxy_private_key_pem = fc.get('proxy_private_key_pem', '')
 
     class Guacamole:
         def __init__(self, gc: dict):

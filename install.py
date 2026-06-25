@@ -2536,27 +2536,19 @@ def create_iptables_rules_script():
     retry_count = 0
 
     while retry_count < max_retries:
-        try:
-            result = subprocess.run(
-                ["minikube", "kubectl", "--", "get", "svc", "ingress-nginx-controller", "-n", "ingress-nginx",
-                 "-o", "jsonpath={.spec.ports[?(@.name==\"http\")].nodePort},{.spec.ports[?(@.name==\"https\")].nodePort}"],
-                capture_output=True, text=True, check=True
-            )
-            ports = result.stdout.strip().split(',')
+        ports_output = cmd_output(
+            f"{KUBECTL} get svc ingress-nginx-controller -n ingress-nginx"
+            f" -o jsonpath={{{{.spec.ports[?(@.name==\"http\")].nodePort}}}},{{{{.spec.ports[?(@.name==\"https\")].nodePort}}}}"
+        )
+        ports = ports_output.strip().split(',')
 
-            if len(ports) == 2 and ports[0] and ports[1]:
-                http_nodeport = ports[0]
-                https_nodeport = ports[1]
-                print(f"Detected NodePorts from ingress-nginx service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
-                break
-            else:
-                print(f"Warning: Could not parse nodeports (attempt {retry_count + 1}/{max_retries}), retrying...")
-                retry_count += 1
-                if retry_count < max_retries:
-                    time.sleep(10)
-
-        except subprocess.CalledProcessError as e:
-            print(f"Warning: Could not get ingress service info (attempt {retry_count + 1}/{max_retries}): {e}")
+        if len(ports) == 2 and ports[0] and ports[1]:
+            http_nodeport = ports[0]
+            https_nodeport = ports[1]
+            print(f"Detected NodePorts from ingress-nginx service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
+            break
+        else:
+            print(f"Warning: Could not parse nodeports (attempt {retry_count + 1}/{max_retries}), retrying...")
             retry_count += 1
             if retry_count < max_retries:
                 time.sleep(10)
@@ -3387,23 +3379,39 @@ def install_fed_search(CONFIG):
         _os.remove(root_cert_file)
         print(" Secret 'root-crt-pem' applied")
 
-        # --- Secret: proxy private key (projected volume in beam-proxy pod) ---
-        proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', None)
+        # --- Secret: private key (skip if secret already exists - user manages it manually) ---
+        proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', '')
         if proxy_private_key_pem:
-            privkey_file = "/tmp/beam-privkey.pem"
-            with open(privkey_file, "w") as f:
-                f.write(proxy_private_key_pem)
-            cmd(
-                f"minikube kubectl -- create secret generic eucaim-broker-eucaim-cancerimage-eu-priv-pem"
-                f" --namespace federated-search"
-                f" --from-file=eucaim.broker.eucaim.cancerimage.eu.priv.pem={privkey_file}"
-                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+            _priv_secret_name = "certs"
+            try:
+                with open("beam.yaml") as _f:
+                    import re as _re
+                    _m = _re.search(r'secret:\s*\n\s+name:\s+(\S+)', _f.read())
+                    if _m:
+                        _priv_secret_name = _m.group(1)
+            except Exception:
+                pass
+            _exists = cmd(
+                f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search 2>/dev/null",
+                exit_on_error=False,
             )
-            import os as _os2; _os2.remove(privkey_file)
-            print(" Secret 'eucaim-broker-eucaim-cancerimage-eu-priv-pem' applied")
+            if _exists == 0:
+                print(f" Secret '{_priv_secret_name}' already exists, skipping.")
+            else:
+                privkey_file = "/tmp/beam-privkey.pem"
+                with open(privkey_file, "w") as f:
+                    f.write(proxy_private_key_pem)
+                cmd(
+                    f"minikube kubectl -- create secret generic {_priv_secret_name}"
+                    f" --namespace federated-search"
+                    f" --from-file=proxy.pem={privkey_file}"
+                    f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+                )
+                import os as _os2; _os2.remove(privkey_file)
+                print(f" Secret '{_priv_secret_name}' created")
         else:
             print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
-            print("  Beam-proxy will fail to start until this secret is created manually.")
+            print("  Beam-proxy pod will fail until this secret is created manually.")
 
         # --- Focus deployment ---
         # Parse focus.yaml to: strip Secret docs, strip nodeSelector/priorityClassName
