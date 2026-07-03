@@ -1,0 +1,11 @@
+{
+    "newVersion": {
+        "repository": "/home/ds/persistent-shared-folder/apps/jobman/jobman.tar.gz",
+        "packageJsonPath": "jobman/package.json",
+        "customMessage": "Execute \"install-jobman\" to upgrade your current installation to the latest version.",
+        "check": "24h"
+    },
+    "datasetsListEnvVar": "DATASETS_LIST",
+    "webServiceUrl": "http://jobman-service.jobman-service:8080/jobman-service/api/v1",
+    "apiTokenEnvName": "JOBMAN_SERVICE_API_TOKEN"
+}
