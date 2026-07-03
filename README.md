@@ -63,6 +63,11 @@ The following tools must be installed before running the installation:
    curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
    ```
 
+7. **Node.js / npm** *(required for orthanc-wrapper on production clusters)*
+   ```bash
+   sudo apt-get install nodejs npm
+   ```
+
 ### Required Repositories
 
 Some repositories must be cloned manually before running the installation:
@@ -157,10 +162,12 @@ The script supports the deployment on Kubernetes, selected via the `--k8s` flag:
    python3 install.py <flavor> --k8s
    ```
 
-   > **Note:** OIDC configuration for the Kubernetes API server and firewall rules
-   > must be set up manually when using a production cluster, as they depend on
-   > direct SSH access to the control-plane node (handled automatically only in
-   > Minikube mode).
+   > **Manual steps for production clusters:**
+   > - **OIDC kube-apiserver**: Configure OIDC flags on the API server (see installer output for details)
+   > - **Orthanc wrapper**: The installer extracts files and runs `npm install` locally
+   >   using `{host_path}/orthanc/orthanc-wrapper/`. Ensure `npm` is available on the machine.
+   > - **Bindfs mounts**: Set up manually on cluster nodes if datalake symlink resolution is needed
+   > - **Ingress**: Ensure an ingress controller (nginx) is installed in the cluster
 
 
 

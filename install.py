@@ -27,14 +27,82 @@ CONFIG = None
 KUBECTL = "minikube kubectl --" 
 USE_MINIKUBE = True              
 
+def _localize_minikube(command):
+    '''Convert a minikube ssh/cp command to a local equivalent using CONFIG.host_path.
+    Returns (localized_command, None) if convertible, or (None, manual_instruction) if complex.'''
+    if CONFIG is None:
+        return None, None
+    host_path = getattr(CONFIG, 'host_path', '')
+    if not host_path:
+        return None, None
+
+    strip = "minikube ssh -- '"
+    if command.startswith(strip) and command.endswith("'"):
+        inner = command[len(strip):-1]
+        # Pattern: sudo mkdir -p <dirs>
+        if inner.startswith("sudo mkdir -p "):
+            dirs = inner[len("sudo mkdir -p "):]
+            local = dirs.replace("/var/hostpath-provisioner", host_path)
+            return f"sudo mkdir -p {local}", None
+        # Pattern: sudo chmod -R 777 <dir>
+        if inner.startswith("sudo chmod -R 777 "):
+            path = inner[len("sudo chmod -R 777 "):]
+            return f"sudo chmod -R 777 {path.replace('/var/hostpath-provisioner', host_path)}", None
+        # Pattern: sudo tar -xzf <file> -C <dest>
+        if inner.startswith("sudo tar"):
+            return None, "Extract files manually to " + host_path + "/..."
+        # Pattern: sudo rm <files>
+        if inner.startswith("sudo rm "):
+            files = inner[len("sudo rm "):]
+            return f"sudo rm {files.replace('/var/hostpath-provisioner', host_path)}", None
+        # Pattern: sudo bash <script>
+        if inner.startswith("sudo bash ") or inner.startswith("sudo grep") or inner.startswith("grep"):
+            return None, "Run this script manually on the cluster node"
+        # Pattern: test -f <file>
+        if inner.startswith("test -f "):
+            filep = inner[len("test -f "):]
+            return f"test -f {filep.replace('/var/hostpath-provisioner', host_path)}", None
+        # Pattern: sudo apt-get
+        if inner.startswith("sudo apt-get"):
+            return None, "Install required packages on the cluster node manually"
+        # Pattern: sudo systemctl
+        if inner.startswith("sudo systemctl") or "systemctl" in inner:
+            return None, "Run systemctl commands manually on the cluster node"
+        # Pattern: bindfs / mount / umount
+        if any(kw in inner for kw in ("bindfs", "mount.", "umount ", "/mnt/datalake", "/mnt/datasets", "/var/lib/orthanc")):
+            return None, "Set up bind mounts manually on the cluster node"
+        # Multi-command chains (&& / ;)
+        if "&&" in inner or ";" in inner:
+            return None, "Run these commands manually on the cluster node"
+
+    # Pattern: minikube cp <src> minikube:<dest>
+    cp_match = __import__('re').match(r"^minikube cp (\S+) minikube:(.+)$", command.strip())
+    if cp_match:
+        src = cp_match.group(1)
+        dest = cp_match.group(2)
+        local_dest = dest.replace("/var/hostpath-provisioner", host_path)
+        return f"sudo cp {src} {local_dest}", None
+
+    # Pattern: minikube image load
+    if "minikube image load" in command:
+        return None, "Load container images manually on each cluster node"
+
+    return None, None
+
+
 def _prepare_command(command):
-    '''Substitute kubectl and skip minikube-only commands based on deployment target.'''
+    '''Substitute kubectl and localize/skip minikube-only commands based on deployment target.'''
     command = command.replace("minikube kubectl --", KUBECTL)
-    if not USE_MINIKUBE:
-        for minikube_op in ("minikube ssh", "minikube cp ", "minikube addons", "minikube image load"):
-            if minikube_op in command:
-                print(f"[SKIP - K8s mode, minikube not available]: {command}")
-                return None
+    if not USE_MINIKUBE and ("minikube ssh" in command or "minikube cp " in command
+                             or "minikube addons" in command or "minikube image load" in command):
+        localized, manual = _localize_minikube(command)
+        if localized is not None:
+            print(f"[LOCAL] {localized}")
+            return localized
+        print(f"[SKIP - K8s mode]: {command}")
+        if manual:
+            print(f"  >> ADMIN: {manual}")
+        return None
     return command
 
 def get_node_ip():
@@ -55,6 +123,54 @@ def get_node_ip():
             return result.stdout.strip()
         except subprocess.CalledProcessError:
             return ""
+
+def _normalize_storage_class_name(value: str) -> str:
+    """Normalize jsonpath output to a single storage class name."""
+    value = (value or "").strip().strip("'\"")
+    if not value:
+        return ""
+    return value.split()[0]
+
+
+def _storage_class_exists(sc_name: str) -> bool:
+    """Return True when the given storage class exists in the cluster."""
+    if not sc_name:
+        return False
+    out = cmd_output(f"kubectl get storageclass {shlex.quote(sc_name)} -o name 2>/dev/null")
+    return bool((out or "").strip())
+
+
+def _detect_storage_class():
+    """Detect a usable storage class from the cluster.
+
+    Automation rule:
+    - Minikube mode: use 'standard'.
+    - --k8s mode: use 'managed-nfs-storage'.
+    """
+    preferred = "standard" if USE_MINIKUBE else "managed-nfs-storage"
+
+    default_sc = _normalize_storage_class_name(cmd_output(
+        "kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\\.kubernetes\\.io/is-default-class==\"true\")].metadata.name}' 2>/dev/null"
+    ))
+    first_sc = _normalize_storage_class_name(cmd_output(
+        "kubectl get storageclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+    ))
+
+    if _storage_class_exists(preferred):
+        return preferred
+    if default_sc:
+        print(f" Warning: preferred StorageClass '{preferred}' not found, using default '{default_sc}'")
+        return default_sc
+    if first_sc:
+        print(f" Warning: preferred StorageClass '{preferred}' not found, using first available '{first_sc}'")
+        return first_sc
+
+    if preferred:
+        print(f" Warning: no StorageClass detected, falling back to '{preferred}'")
+        return preferred
+
+    print(" Warning: no StorageClass detected; PVCs will rely on cluster defaults/static provisioning")
+    return ""
 
 ## Function to execute shell commands
 def cmd(command, exit_on_error=True):
@@ -101,18 +217,23 @@ else:
 
 ## TLS secret backup path (persisted across minikube delete)
 _TLS_BACKUP_FILE = os.path.join(SCRIPT_DIR, "mininode-tls-backup.yaml")
+
+def get_tls_secret_name():
+    return getattr(CONFIG, 'public_domain', 'mininode-tls')
+
 _TLS_SECRET_NAME = "mininode-tls"
 
 def save_tls_secret():
+    secret_name = get_tls_secret_name()
     for ns in ("keycloak", "default", "cert-manager"):
-        exists = os.system(f"{KUBECTL} get secret {_TLS_SECRET_NAME} -n {ns} -o name > /dev/null 2>&1") >> 8
+        exists = os.system(f"{KUBECTL} get secret {secret_name} -n {ns} -o name > /dev/null 2>&1") >> 8
         if exists == 0:
             break
     else:
-        print(f" TLS secret {_TLS_SECRET_NAME} not found, skipping backup")
+        print(f" TLS secret '{secret_name}' not found, skipping backup")
         return
-    print(f" Found {_TLS_SECRET_NAME} in namespace {ns}, saving...")
-    saved = os.system(f"{KUBECTL} get secret {_TLS_SECRET_NAME} -n {ns} -o yaml > {_TLS_BACKUP_FILE}") >> 8
+    print(f" Found '{secret_name}' in namespace {ns}, saving...")
+    saved = os.system(f"{KUBECTL} get secret {secret_name} -n {ns} -o yaml > {_TLS_BACKUP_FILE}") >> 8
     if saved == 0 and os.path.getsize(_TLS_BACKUP_FILE) > 0:
         print(f" TLS secret saved to {_TLS_BACKUP_FILE}")
     else:
@@ -122,7 +243,6 @@ def restore_tls_secret():
     if not os.path.exists(_TLS_BACKUP_FILE) or os.path.getsize(_TLS_BACKUP_FILE) == 0:
         return False
     print(f" Found existing TLS backup, restoring secret...")
-    # Validate it's valid YAML before applying
     try:
         with open(_TLS_BACKUP_FILE) as f:
             content = f.read()
@@ -270,11 +390,21 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     cmd("minikube kubectl -- delete pv pv-postgres-data-keycloak pv-themes-data pv-standalone-deployments --timeout=30s --force --grace-period=0 || true")
     cmd("sleep 5")
 
-    cmd("minikube kubectl -- label nodes minikube chaimeleon.eu/target=core-services --overwrite")
+    if USE_MINIKUBE:
+        cmd("minikube kubectl -- label nodes minikube chaimeleon.eu/target=core-services --overwrite")
+    else:
+        _first_node = cmd_output("kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null").strip()
+        if _first_node:
+            cmd(f"kubectl label nodes {_first_node} chaimeleon.eu/target=core-services --overwrite || true")
     cmd("minikube kubectl -- create priorityclass core-services --value=1000 --description='Priority class for core services' || true")
     cmd("minikube kubectl -- create priorityclass core-applications --value=900 --description='Priority class for core applications' || true")
 
-    cmd("minikube ssh -- 'sudo rm -f /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
+    if USE_MINIKUBE:
+        cmd("minikube ssh -- 'sudo rm -f /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
+    else:
+        hp = CONFIG.host_path
+        cmd(f"sudo mkdir -p {hp}/keycloak/postgres-data {hp}/keycloak/themes-data {hp}/keycloak/standalone-deployments")
+        cmd(f"sudo chmod -R 777 {hp}/keycloak")
 
     cmd("sleep 10")
 
@@ -373,7 +503,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     # Always ensure Keycloak volumes (PV + namespaced PVCs) are applied when available
     # This creates the Keycloak PVs and the namespaced PVCs like `postgres-data`.
     if os.path.exists("dep0_volumes.yaml"):
-        print(" Applying dep0_volumes.yaml for Keycloak volumes (pv + pvc) — creating a private file with storageClassName='standard' and applying it")
+        print(" Applying dep0_volumes.yaml for Keycloak volumes (pv + pvc) with a cluster-detected storageClassName")
         # Read file and extract only PersistentVolumeClaim documents
         try:
             with open('dep0_volumes.yaml', 'r') as f:
@@ -381,12 +511,20 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         except Exception as e:
             print(f"  Warning: could not read dep0_volumes.yaml: {e}")
             docs = []
-        # Update storageClassName to 'standard' for all PVCs
+        _sc = _detect_storage_class()
+        if _sc:
+            print(f" Using storage class: {_sc}")
+        else:
+            print(" No storage class detected; preserving PVC behavior without forcing storageClassName")
+        # Update storageClassName for all PVCs
         pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
         for d in pvc_docs:
             if "spec" not in d:
                 d["spec"] = {}
-            d["spec"]["storageClassName"] = "standard"
+            if _sc:
+                d["spec"]["storageClassName"] = _sc
+            else:
+                d["spec"]["storageClassName"] = ""
             if "metadata" not in d:
                 d["metadata"] = {}
             d["metadata"]["namespace"] = "keycloak"
@@ -470,17 +608,28 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
             print(f"   You can manually download it later and copy to /var/hostpath-provisioner/keycloak/standalone-deployments/\n")
 
     cmd("tar -czf /tmp/themes.tar.gz themes/")
-    cmd("minikube cp /tmp/themes.tar.gz minikube:/tmp/")
-    cmd("minikube ssh -- 'sudo tar -xzf /tmp/themes.tar.gz -C /var/hostpath-provisioner/keycloak/themes-data/ --strip-components=1'")
+    if USE_MINIKUBE:
+        cmd("minikube cp /tmp/themes.tar.gz minikube:/tmp/")
+        cmd("minikube ssh -- 'sudo tar -xzf /tmp/themes.tar.gz -C /var/hostpath-provisioner/keycloak/themes-data/ --strip-components=1'")
+    else:
+        kc_dest = os.path.join(CONFIG.host_path, "keycloak", "themes-data")
+        cmd(f"sudo mkdir -p {kc_dest}")
+        cmd(f"sudo tar -xzf /tmp/themes.tar.gz -C {kc_dest} --strip-components=1")
 
     # Only copy JARs if they were successfully downloaded and validated
     if os.path.exists(jar1_path) and os.path.getsize(jar1_path) > 0:
-        cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+        if USE_MINIKUBE:
+            cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+        else:
+            cmd(f"sudo cp {jar1_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
     else:
         print(f"  Warning: Skipping corrupted JAR: {jar1_path}")
 
     if os.path.exists(jar2_path) and os.path.getsize(jar2_path) > 0:
-        cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+        if USE_MINIKUBE:
+            cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+        else:
+            cmd(f"sudo cp {jar2_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
     else:
         print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
 
@@ -510,7 +659,10 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
                 fout.write(l)
 
-    cmd(f"minikube cp {realm_config_file_private_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+    if USE_MINIKUBE:
+        cmd(f"minikube cp {realm_config_file_private_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+    else:
+        cmd(f"sudo cp {realm_config_file_private_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
 
     cmd("minikube kubectl -- apply -f dep2_database.yaml -n keycloak")
     cmd("minikube kubectl -- wait --for=condition=ready pod -l app=db -n keycloak --timeout=300s")
@@ -551,22 +703,18 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         # Always use the same ingress file (no separate TLS ingress file)
         update_ingress_host(ingress_file, CONFIG.public_domain)
 
-        print("Checking if ingress already exists...")
-        ingress_exists = cmd(f"minikube kubectl -- get ingress proxy-keycloak -n keycloak 2>/dev/null", exit_on_error=False)
+        print(f" Applying/updating Keycloak ingress with domain: {CONFIG.public_domain}")
+        cmd(f"minikube kubectl -- apply -f {ingress_file} -n keycloak")
 
-        if ingress_exists == 0:
-            print(" Ingress already exists - preserving to avoid certificate recreation")
-
-        else:
-            print("Creating new ingress...")
-            cmd(f"minikube kubectl -- apply -f {ingress_file} -n keycloak")
-
-            if use_tls:
-                print("TLS certificate will be automatically provisioned by cert-manager")
+        if use_tls:
+            print("TLS certificate will be automatically provisioned by cert-manager")
 
     os.chdir("..")
 
 def ensure_ingress_addon():
+    if not USE_MINIKUBE:
+        print("SKIP - ingress addon management (K8s mode). Ensure nginx-ingress is installed manually.")
+        return
     print("Checking minikube ingress addon...")
     ret = cmd("minikube addons list | grep 'ingress' | grep 'enabled'", exit_on_error=False)
     if ret != 0:
@@ -770,6 +918,13 @@ def update_ingress_host(ingress_file: str, domain: str):
     content = re.sub(
         r'(tls:\s*\n\s*-\s*hosts:\s*\n\s*-\s*)([A-Za-z0-9.-]+)',
         rf'\1"{domain}"',
+        content
+    )
+
+    # Replace secretName in TLS section with the domain
+    content = re.sub(
+        r'(secretName:\s*)[a-zA-Z0-9._-]+',
+        rf'\1{domain}',
         content
     )
 
@@ -1381,23 +1536,32 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
         os.chdir(guacamole)
         # Ensure namespace and PVC exist
         cmd("minikube kubectl -- create namespace guacamole || true")
-        # Adaptar el PVC de guacamole-postgresql para usar storageClassName: 'standard' siempre
+        # Adapt the guacamole-postgresql PVC to a storage class available in the cluster.
         pvc_path = os.path.join(os.getcwd(), "postgresql-pvc.yaml")
         with open(pvc_path, 'r') as f:
             pvc_docs = list(yaml.safe_load_all(f))
         updated = False
-        # Eliminar cualquier PersistentVolume y adaptar el PVC a storageClassName: 'standard'
+        # Keep only PVCs and set/remove storageClassName depending on cluster capabilities.
         new_docs = []
+        _sc = _detect_storage_class()
         for doc in pvc_docs:
             if doc.get('kind') == 'PersistentVolumeClaim':
-                doc['spec']['storageClassName'] = 'standard'
+                if 'spec' not in doc:
+                    doc['spec'] = {}
+                if _sc:
+                    doc['spec']['storageClassName'] = _sc
+                else:
+                    doc['spec']['storageClassName'] = ""
                 new_docs.append(doc)
                 updated = True
-            # Ignorar cualquier PersistentVolume
+            # Ignore PersistentVolume documents.
         if updated:
             with open(pvc_path, 'w') as f:
                 yaml.safe_dump_all(new_docs, f, sort_keys=False)
-            print("Adapted postgresql-pvc.yaml for Guacamole: solo PVC y storageClassName: standard")
+            if _sc:
+                print(f"Adapted postgresql-pvc.yaml for Guacamole: PVC only and storageClassName={_sc}")
+            else:
+                print("Adapted postgresql-pvc.yaml for Guacamole: PVC only and no forced storageClassName")
         cmd("minikube kubectl -- apply -f postgresql-pvc.yaml -n guacamole")
 
         # 1. Update PostgreSQL values in a private file
@@ -1488,7 +1652,7 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
                 if 'tls' in data_pg['ingress']:
                     for tls_entry in data_pg['ingress']['tls']:
                         tls_entry['hosts'] = [CONFIG.public_domain]
-                        tls_entry['secretName'] = _TLS_SECRET_NAME
+                        tls_entry['secretName'] = get_tls_secret_name()
 
         # Write a private guacamole values file without altering image fields
         with open(guacamole_values_private_file, 'w') as f:
@@ -1919,6 +2083,21 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
 
 def configure_kube_apiserver_oidc(CONFIG):
     '''Configure kube-apiserver with OIDC authentication for Kubeapps'''
+    if not USE_MINIKUBE:
+        print(f"\n{'='*80}")
+        print(" KUBE-APISERVER OIDC CONFIGURATION (SKIPPED)")
+        print(f"{'='*80}")
+        print("  >> ADMIN: Configure OIDC manually on your cluster:")
+        print(f"      1. Add --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE")
+        print(f"      2. Add --oidc-client-id=kubernetes")
+        print(f"      3. Add --oidc-username-claim=preferred_username")
+        print(f"      4. Add --oidc-username-prefix=oidc:")
+        print(f"      5. Add --oidc-groups-claim=groups")
+        print(f"      6. Add --oidc-groups-prefix=oidc:")
+        print(f"    For kubeadm: edit /etc/kubernetes/manifests/kube-apiserver.yaml")
+        print(f"    For managed K8s: use cloud provider's OIDC configuration API")
+        return
+
     print(f"\n{'='*80}")
     print(" Configuring kube-apiserver with OIDC")
     print(f"{'='*80}\n")
@@ -2087,7 +2266,12 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         cmd("minikube kubectl -- create namespace kubeapps || true")
 
         # Label node for core services
-        cmd("minikube kubectl -- label nodes minikube chaimeleon.eu/target=core-services --overwrite")
+        if USE_MINIKUBE:
+            cmd("minikube kubectl -- label nodes minikube chaimeleon.eu/target=core-services --overwrite")
+        else:
+            _first_node = cmd_output("kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null").strip()
+            if _first_node:
+                cmd(f"kubectl label nodes {_first_node} chaimeleon.eu/target=core-services --overwrite || true")
 
         # Create priority classes if not exist
         cmd("minikube kubectl -- create priorityclass core-services --value=1000 --description='Priority class for core services' || true")
@@ -2133,7 +2317,7 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
                         data['ingress']['tls'] = True
                     data['ingress']['extraTls'] = [{
                         'hosts': [CONFIG.public_domain],
-                        'secretName': _TLS_SECRET_NAME
+                        'secretName': get_tls_secret_name()
                     }]
                     print(f" Configured Helm-managed Ingress with TLS: {CONFIG.public_domain}")
                 else:
@@ -2204,9 +2388,8 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
             data['global']['security']['allowInsecureImages'] = True
             print(f" Enabled allowInsecureImages for Harbor registry")
 
-        # Configure PostgreSQL storageClass based on flavor
-        # micro: uses 'standard' (minikube default)
-        # standard: uses 'cephfs' (CephFS storage)
+        # Configure PostgreSQL storageClass dynamically
+        _sc = _detect_storage_class()
         if CONFIG.flavor == 'micro':
             if 'postgresql' not in data:
                 data['postgresql'] = {}
@@ -2214,8 +2397,12 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
                 data['postgresql']['primary'] = {}
             if 'persistence' not in data['postgresql']['primary']:
                 data['postgresql']['primary']['persistence'] = {}
-            data['postgresql']['primary']['persistence']['storageClass'] = 'standard'
-            print(f" Configured PostgreSQL to use 'standard' storageClass for micro flavor")
+            if _sc:
+                data['postgresql']['primary']['persistence']['storageClass'] = _sc
+                print(f" Configured PostgreSQL to use '{_sc}' storageClass")
+            else:
+                data['postgresql']['primary']['persistence'].pop('storageClass', None)
+                print(" No storage class detected; PostgreSQL will use chart/cluster defaults")
 
         # Configure app repository with dynamic domain
         if 'apprepository' not in data:
@@ -2350,34 +2537,34 @@ def install_cert_manager(CONFIG):
 
     cert_manager_success = False
 
-    # Method 1: Pre-load images using Docker and then install
-    print("Pre-loading cert-manager images into minikube...")
+    images_loaded = False
+    if USE_MINIKUBE:
+        # Method 1: Pre-load images using Docker and then install
+        print("Pre-loading cert-manager images into minikube...")
 
-    # List of cert-manager images for v1.18.2
-    images = [
-        "quay.io/jetstack/cert-manager-controller:v1.18.2",
-        "quay.io/jetstack/cert-manager-cainjector:v1.18.2",
-        "quay.io/jetstack/cert-manager-webhook:v1.18.2"
-    ]
+        # List of cert-manager images for v1.18.2
+        images = [
+            "quay.io/jetstack/cert-manager-controller:v1.18.2",
+            "quay.io/jetstack/cert-manager-cainjector:v1.18.2",
+            "quay.io/jetstack/cert-manager-webhook:v1.18.2"
+        ]
 
-    # Pull images with Docker and load into minikube
-    images_loaded = True
-    for image in images:
-        # Pull with docker
-        pull_result = cmd(f"docker pull {image}", exit_on_error=False)
-        if pull_result == 0:
-            # Load into minikube
-            load_result = cmd(f"minikube image load {image}", exit_on_error=False)
-            if load_result != 0:
-                print(f"  Failed to load {image} into minikube")
+        # Pull images with Docker and load into minikube
+        images_loaded = True
+        for image in images:
+            pull_result = cmd(f"docker pull {image}", exit_on_error=False)
+            if pull_result == 0:
+                load_result = cmd(f"minikube image load {image}", exit_on_error=False)
+                if load_result != 0:
+                    print(f"  Failed to load {image} into minikube")
+                    images_loaded = False
+                    break
+            else:
+                print(f"  Failed to pull {image} with Docker")
                 images_loaded = False
                 break
-        else:
-            print(f"  Failed to pull {image} with Docker")
-            images_loaded = False
-            break
 
-    if images_loaded:
+    if images_loaded or not USE_MINIKUBE:
         print("Images loaded, installing cert-manager v1.18.2...")
         # Now install cert-manager - images should be available locally in minikube
         yaml_install = cmd("minikube kubectl -- apply -f https://github.com/cert-manager/cert-manager/releases/download/v1.18.2/cert-manager.yaml", exit_on_error=False)
@@ -2536,19 +2723,27 @@ def create_iptables_rules_script():
     retry_count = 0
 
     while retry_count < max_retries:
-        ports_output = cmd_output(
-            f"{KUBECTL} get svc ingress-nginx-controller -n ingress-nginx"
-            f" -o jsonpath={{{{.spec.ports[?(@.name==\"http\")].nodePort}}}},{{{{.spec.ports[?(@.name==\"https\")].nodePort}}}}"
-        )
-        ports = ports_output.strip().split(',')
+        try:
+            result = subprocess.run(
+                ["minikube", "kubectl", "--", "get", "svc", "ingress-nginx-controller", "-n", "ingress-nginx",
+                 "-o", "jsonpath={.spec.ports[?(@.name==\"http\")].nodePort},{.spec.ports[?(@.name==\"https\")].nodePort}"],
+                capture_output=True, text=True, check=True
+            )
+            ports = result.stdout.strip().split(',')
 
-        if len(ports) == 2 and ports[0] and ports[1]:
-            http_nodeport = ports[0]
-            https_nodeport = ports[1]
-            print(f"Detected NodePorts from ingress-nginx service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
-            break
-        else:
-            print(f"Warning: Could not parse nodeports (attempt {retry_count + 1}/{max_retries}), retrying...")
+            if len(ports) == 2 and ports[0] and ports[1]:
+                http_nodeport = ports[0]
+                https_nodeport = ports[1]
+                print(f"Detected NodePorts from ingress-nginx service: HTTP={http_nodeport}, HTTPS={https_nodeport}")
+                break
+            else:
+                print(f"Warning: Could not parse nodeports (attempt {retry_count + 1}/{max_retries}), retrying...")
+                retry_count += 1
+                if retry_count < max_retries:
+                    time.sleep(10)
+
+        except subprocess.CalledProcessError as e:
+            print(f"Warning: Could not get ingress service info (attempt {retry_count + 1}/{max_retries}): {e}")
             retry_count += 1
             if retry_count < max_retries:
                 time.sleep(10)
@@ -3274,27 +3469,29 @@ def package_workstation_charts(CONFIG):
                 # Copy to minikube dataset-service-data volume
                 print(f"\n Copying charts to dataset-service...")
 
-                # Ensure output-files/charts directory exists in minikube
-                cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files/charts'")
-                cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files'")
-
-                # Also create the directory on the host for helm repo index command
+                # Ensure output-files/charts directory exists
                 host_charts_dir = os.path.join(CONFIG.host_path, "dataset-service/dataset-service-data/output-files/charts")
                 host_output_files_dir = os.path.join(CONFIG.host_path, "dataset-service/dataset-service-data/output-files")
                 cmd(f"sudo mkdir -p {host_charts_dir}")
                 cmd(f"sudo chmod -R 777 {host_output_files_dir}")
 
-                # Copy entire packaged directory contents to minikube using tar
+                if USE_MINIKUBE:
+                    cmd("minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files/charts'")
+                    cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files'")
+
+                # Copy entire packaged directory contents using tar
                 print(f"  Copying all files from {packaged_charts_dir}...")
 
                 # Create tar.gz with all contents
                 cmd(f"tar -czf /tmp/charts-packaged.tar.gz -C {packaged_charts_dir} .")
 
-                # Copy tar to minikube
-                cmd("minikube cp /tmp/charts-packaged.tar.gz minikube:/tmp/")
-
-                # Extract in destination directory
-                cmd("minikube ssh -- 'sudo tar -xzf /tmp/charts-packaged.tar.gz -C /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files/charts/'")
+                if USE_MINIKUBE:
+                    # Copy tar to minikube and extract there
+                    cmd("minikube cp /tmp/charts-packaged.tar.gz minikube:/tmp/")
+                    cmd("minikube ssh -- 'sudo tar -xzf /tmp/charts-packaged.tar.gz -C /var/hostpath-provisioner/dataset-service/dataset-service-data/output-files/charts/'")
+                else:
+                    # Extract locally (already at host_charts_dir)
+                    cmd(f"sudo tar -xzf /tmp/charts-packaged.tar.gz -C {host_charts_dir}")
 
                 # Re-apply permissions after extraction (tar inside minikube creates root-owned files
                 # on the host-mounted path, which would otherwise block helm repo index)
@@ -3310,8 +3507,8 @@ def package_workstation_charts(CONFIG):
                 cmd(f"sudo chmod 644 {host_charts_dir}/index.yaml")
 
                 # Clean up temporary files
-                cmd("minikube ssh -- 'sudo rm /tmp/charts-packaged.tar.gz'")
-                cmd("rm /tmp/charts-packaged.tar.gz")
+                cmd("minikube ssh -- 'sudo rm -f /tmp/charts-packaged.tar.gz'")
+                cmd("rm -f /tmp/charts-packaged.tar.gz")
 
                 print(f"\n Workstation charts published successfully!")
                 print(f" Charts available at: http://{CONFIG.public_domain}/dataset-service/output-files/charts/")
@@ -3621,95 +3818,102 @@ def install_orthanc(CONFIG):
         for subdir in ["orthanc-storage", "orthanc-db", "keycloak-db", "orthanc-wrapper"]:
             cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/{subdir}'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
-
         # Populate orthanc-wrapper payload from fixed tar file in repo.
         # Expected input: k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz
         wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
-        wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
 
-        if os.path.isfile(wrapper_repo_tar):
-            print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
-            cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
-            cmd(
-                "minikube ssh -- '"
-                "set -e; "
-                "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
-                "TMP=/tmp/orthanc-wrapper-seed-unpack; "
-                "sudo mkdir -p $TARGET; "
-                "sudo rm -rf $TMP; "
-                "sudo mkdir -p $TMP; "
-                "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
-                "if [ -f $TMP/init_node.sh ]; then "
-                "  SRC=$TMP; "
-                "elif [ -f $TMP/wrapper/init_node.sh ]; then "
-                "  SRC=$TMP/wrapper; "
-                "else "
-                "  FOUND=$(sudo find $TMP -maxdepth 4 -type f -name init_node.sh | head -n1); "
-                "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
-                "fi; "
-                "sudo rm -rf $TARGET/*; "
-                "sudo cp -a $SRC/. $TARGET/; "
-                "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
-                "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
-                "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
-                "sudo chmod -R 755 $TARGET'"
-            )
-            cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
-            cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
-        else:
-            print(
-                "  Warning: orthanc-wrapper payload not found. "
-                "Expected k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz"
-            )
+        if USE_MINIKUBE:
+            wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
+            if os.path.isfile(wrapper_repo_tar):
+                print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
+                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
+                cmd(
+                    "minikube ssh -- '"
+                    "set -e; "
+                    "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
+                    "TMP=/tmp/orthanc-wrapper-seed-unpack; "
+                    "sudo mkdir -p $TARGET; "
+                    "sudo rm -rf $TMP; "
+                    "sudo mkdir -p $TMP; "
+                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
+                    "if [ -f $TMP/init_node.sh ]; then "
+                    "  SRC=$TMP; "
+                    "elif [ -f $TMP/wrapper/init_node.sh ]; then "
+                    "  SRC=$TMP/wrapper; "
+                    "else "
+                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f -name init_node.sh | head -n1); "
+                    "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
+                    "fi; "
+                    "sudo rm -rf $TARGET/*; "
+                    "sudo cp -a $SRC/. $TARGET/; "
+                    "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
+                    "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
+                    "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
+                    "sudo chmod -R 755 $TARGET'"
+                )
+                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
+                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
+            else:
+                print(
+                    "  Warning: orthanc-wrapper payload not found. "
+                    "Expected k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz"
+                )
 
-        wrapper_payload_available = (
-            cmd(
-                "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh'",
-                exit_on_error=False,
-            ) == 0
-        )
-        if not wrapper_payload_available:
-            print(
-                "  Warning: /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh is missing; "
-                "orthanc-wrapper deployment will be skipped"
+            wrapper_payload_available = (
+                cmd(
+                    "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh'",
+                    exit_on_error=False,
+                ) == 0
             )
-        else:
-            print(" Ensuring Orthanc wrapper Node/Meteor runtime dependencies are installed...")
-            wrapper_dep_ret = cmd(
-                "minikube ssh -- '"
-                "WRAPPER_DIR=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
-                "SERVER_DIR=$WRAPPER_DIR/bundle/programs/server; "
-                "if [ -f \"$SERVER_DIR/package.json\" ]; then "
-                "if ! command -v npm >/dev/null 2>&1; then "
-                "echo \"npm not found on minikube node, installing nodejs/npm...\"; "
-                "sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm; "
-                "fi; "
-                "cd \"$SERVER_DIR\" && "
-                "if [ -f package-lock.json ]; then "
-                "npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund; "
-                "else "
-                "npm install --omit=dev --no-audit --no-fund; "
-                "fi && "
-                "npm install --no-save --no-audit --no-fund @meteorjs/reify && "
-                "node -e 'require(\"@meteorjs/reify/lib/runtime\"); console.log(\"reify-ok\")'; "                "else "
-                "echo \"WARN: $SERVER_DIR/package.json not found, skipping wrapper dependency bootstrap\"; "
-                "fi'",
-                exit_on_error=False,
-            )
-            if wrapper_dep_ret != 0:
+            if not wrapper_payload_available:
                 print(
-                    "  Warning: could not auto-install orthanc-wrapper dependencies in minikube; "
-                    "wrapper pod may fail until dependencies are installed manually"
+                    "  Warning: /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh is missing; "
+                    "orthanc-wrapper deployment will be skipped"
                 )
-            runtime_check_ret = cmd(
-                "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/bundle/programs/server/node_modules/@meteorjs/reify/lib/runtime.js'",
-                exit_on_error=False,
-            )
-            if runtime_check_ret != 0:
-                print(
-                    "  Warning: @meteorjs/reify runtime not found after bootstrap; "
-                    "orthanc-wrapper may still fail with missing module errors"
+            else:
+                print(" Ensuring Orthanc wrapper Node/Meteor runtime dependencies are installed...")
+                wrapper_dep_ret = cmd(
+                    "minikube ssh -- '"
+                    "WRAPPER_DIR=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
+                    "SERVER_DIR=$WRAPPER_DIR/bundle/programs/server; "
+                    "if [ -f \"$SERVER_DIR/package.json\" ]; then "
+                    "if ! command -v npm >/dev/null 2>&1; then "
+                    "echo \"npm not found on minikube node, installing nodejs/npm...\"; "
+                    "sudo apt-get update -qq && sudo apt-get install -y -qq nodejs npm; "
+                    "fi; "
+                    "cd \"$SERVER_DIR\" && "
+                    "if [ -f package-lock.json ]; then "
+                    "npm ci --omit=dev --no-audit --no-fund || npm install --omit=dev --no-audit --no-fund; "
+                    "else "
+                    "npm install --omit=dev --no-audit --no-fund; "
+                    "fi && "
+                    "npm install --no-save --no-audit --no-fund @meteorjs/reify && "
+                    "node -e 'require(\"@meteorjs/reify/lib/runtime\"); console.log(\"reify-ok\")'; "
+                    "else "
+                    "echo \"WARN: $SERVER_DIR/package.json not found, skipping wrapper dependency bootstrap\"; "
+                    "fi'",
+                    exit_on_error=False,
                 )
+                if wrapper_dep_ret != 0:
+                    print(
+                        "  Warning: could not auto-install orthanc-wrapper dependencies in minikube; "
+                        "wrapper pod may fail until dependencies are installed manually"
+                    )
+                runtime_check_ret = cmd(
+                    "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/bundle/programs/server/node_modules/@meteorjs/reify/lib/runtime.js'",
+                    exit_on_error=False,
+                )
+                if runtime_check_ret != 0:
+                    print(
+                        "  Warning: @meteorjs/reify runtime not found after bootstrap; "
+                        "orthanc-wrapper may still fail with missing module errors"
+                    )
+        elif os.path.isfile(wrapper_repo_tar):
+            print(" Orthanc wrapper deployment (SKIP - K8s mode)")
+            print("  >> ADMIN: Manually deploy orthanc-wrapper from:")
+            print(f"       {wrapper_repo_tar}")
+            print(f"       Extract to {CONFIG.host_path}/orthanc/orthanc-wrapper/")
+            print(f"       Then install npm dependencies in bundle/programs/server")
 
         # Copy Lua script from repo into the host-path for Orthanc
         script_source = os.path.join(orthanc_dir, "scripts", "script.lua")
@@ -3845,38 +4049,46 @@ def install_orthanc(CONFIG):
 
         # Setup bindfs mounts on the minikube node so that desktops and jobman
         # can access datalake files with symlinks resolved to the real DICOM files.
-        print(" Setting up bindfs mounts on minikube node...")
-        cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
+        if USE_MINIKUBE:
+            print(" Setting up bindfs mounts on minikube node...")
+            cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
 
-        # 1. /var/lib/orthanc → actual orthanc storage (needed to resolve symlinks)
-        cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
-        cmd("minikube ssh -- '"
-            "sudo sed -i \"/var\\/lib\\/orthanc/d\" /etc/fstab && "
-            "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
-            "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " | sudo tee -a /etc/fstab > /dev/null'")
+            # 1. /var/lib/orthanc → actual orthanc storage (needed to resolve symlinks)
+            cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
+            cmd("minikube ssh -- '"
+                "sudo sed -i \"/var\\/lib\\/orthanc/d\" /etc/fstab && "
+                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
+                "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                " | sudo tee -a /etc/fstab > /dev/null'")
 
-        # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
-        cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/dataset-service/datalake/storage_link'")
-        cmd("minikube ssh -- '"
-            "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
-            "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
-            "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " | sudo tee -a /etc/fstab > /dev/null'")
+            # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
+            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/dataset-service/datalake/storage_link'")
+            cmd("minikube ssh -- '"
+                "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
+                "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
+                "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                " | sudo tee -a /etc/fstab > /dev/null'")
 
-        # 3. /mnt/datasets → datasets (for desktops/jobman)
-        cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
-        cmd("minikube ssh -- '"
-            "sudo sed -i \"/mnt\\/datasets/d\" /etc/fstab && "
-            "printf \"/var/hostpath-provisioner/dataset-service/datasets"
-            "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-            " | sudo tee -a /etc/fstab > /dev/null'")
+            # 3. /mnt/datasets → datasets (for desktops/jobman)
+            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
+            cmd("minikube ssh -- '"
+                "sudo sed -i \"/mnt\\/datasets/d\" /etc/fstab && "
+                "printf \"/var/hostpath-provisioner/dataset-service/datasets"
+                "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                " | sudo tee -a /etc/fstab > /dev/null'")
 
-        # Reload systemd so it sees the new fstab, then (re)mount all three
-        cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
-        cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
-        cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
-        cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
+            # Reload systemd so it sees the new fstab, then (re)mount all three
+            cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
+            cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
+            cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
+            cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
+        else:
+            hp = CONFIG.host_path
+            print(" SKIP bindfs mounts (K8s mode)")
+            print("  >> ADMIN: Set up bindfs mounts manually on your cluster nodes if needed:")
+            print(f"      bindfs {hp}/orthanc/orthanc-storage /var/lib/orthanc -o nouser,ro,resolve-symlinks,perms=o+rD")
+            print(f"      bindfs {hp}/dataset-service/datalake/storage_link /mnt/datalake -o nouser,ro,resolve-symlinks,perms=o+rD")
+            print(f"      bindfs {hp}/dataset-service/datasets /mnt/datasets -o nouser,ro,resolve-symlinks,perms=o+rD")
 
         print(f" Orthanc installation completed")
         print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
