@@ -3737,6 +3737,37 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
         else:
             print(f"  Warning: {cron_job_file} not found")
 
+        # Build and deploy jobman client (works in both minikube and K8s modes)
+        jobman_root = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "jobman")
+        if os.path.isdir(jobman_root):
+            print(f"\n Building Jobman client...")
+            _build_cwd = os.getcwd()
+            os.chdir(jobman_root)
+            if not os.path.isdir("node_modules"):
+                print(" Running npm install...")
+                os.system("npm install")
+            if os.path.exists("release.sh"):
+                print(" Running ./release.sh client...")
+                os.system("bash release.sh client")
+            os.chdir(_build_cwd)
+            client_dest = "/var/hostpath-provisioner/homes/shared-folder/apps/jobman"
+            client_tar = os.path.join(jobman_root, "build", "jobman.tar.gz")
+            if os.path.exists(client_tar):
+                print(f" Copying jobman client payload to {CONFIG.host_path}/homes/shared-folder/apps/jobman/...")
+                cmd(f"minikube ssh -- 'sudo mkdir -p {client_dest}'")
+                cmd(f"minikube cp {shlex.quote(client_tar)} minikube:{shlex.quote(client_dest + '/')}")
+            else:
+                print(f"  Warning: {client_tar} not found, client build may have failed")
+            client_settings = os.path.join(SCRIPT_DIR, "settings.json")
+            if os.path.exists(client_settings):
+                cmd(f"minikube cp {shlex.quote(client_settings)} minikube:{shlex.quote(client_dest + '/')}")
+                print(f" settings.json copied")
+            else:
+                print(f"  Warning: settings.json not found at {client_settings}")
+                print(f"  Place it at {CONFIG.host_path}/homes/shared-folder/apps/jobman/settings.json")
+        else:
+            print(f"  Warning: jobman repo not found at {jobman_root}")
+
         # Wait for deployment to be ready
         print(f"\n Waiting for Jobman deployment to be ready...")
         cmd("minikube kubectl -- wait --for=condition=available deployment/jobman-service-deployment -n jobman-service --timeout=180s || true")
@@ -3821,6 +3852,8 @@ def install_orthanc(CONFIG):
         # Populate orthanc-wrapper payload from fixed tar file in repo.
         # Expected input: k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz
         wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
+
+        wrapper_payload_available = False
 
         if USE_MINIKUBE:
             wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
