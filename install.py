@@ -3750,10 +3750,10 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
                 print(" Running ./release.sh client...")
                 os.system("bash release.sh client")
             os.chdir(_build_cwd)
-            client_dest = "/var/hostpath-provisioner/homes/shared-folder/apps/jobman"
+            client_dest = "/var/hostpath-provisioner/data/homes/shared-folder/apps/jobman"
             client_tar = os.path.join(jobman_root, "build", "jobman.tar.gz")
             if os.path.exists(client_tar):
-                print(f" Copying jobman client payload to {CONFIG.host_path}/homes/shared-folder/apps/jobman/...")
+                print(f" Copying jobman client payload to {CONFIG.host_path}/data/homes/shared-folder/apps/jobman/...")
                 cmd(f"minikube ssh -- 'sudo mkdir -p {client_dest}'")
                 cmd(f"minikube cp {shlex.quote(client_tar)} minikube:{shlex.quote(client_dest + '/')}")
             else:
@@ -3764,7 +3764,7 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
                 print(f" settings.json copied")
             else:
                 print(f"  Warning: settings.json not found at {client_settings}")
-                print(f"  Place it at {CONFIG.host_path}/homes/shared-folder/apps/jobman/settings.json")
+                print(f"  Place it at {CONFIG.host_path}/data/homes/shared-folder/apps/jobman/settings.json")
         else:
             print(f"  Warning: jobman repo not found at {jobman_root}")
 
