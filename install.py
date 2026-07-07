@@ -222,6 +222,7 @@ def get_tls_secret_name():
     return getattr(CONFIG, 'public_domain', 'mininode-tls')
 
 _TLS_SECRET_NAME = "mininode-tls"
+_TLS_CERT_BACKUP_FILE = os.path.join(SCRIPT_DIR, "mininode-tls-cert-backup.yaml")
 
 def save_tls_secret():
     secret_name = get_tls_secret_name()
@@ -238,6 +239,14 @@ def save_tls_secret():
         print(f" TLS secret saved to {_TLS_BACKUP_FILE}")
     else:
         print(f" Failed to save TLS secret")
+    # Also backup the Certificate resource (so cert-manager doesn't re-issue)
+    cert_ns = ns
+    cert_exists = os.system(f"{KUBECTL} get certificate {secret_name} -n {cert_ns} -o name > /dev/null 2>&1") >> 8
+    if cert_exists == 0:
+        os.system(f"{KUBECTL} get certificate {secret_name} -n {cert_ns} -o yaml > {_TLS_CERT_BACKUP_FILE}")
+        print(f" TLS Certificate backed up to {_TLS_CERT_BACKUP_FILE}")
+    else:
+        print(f" Certificate '{secret_name}' not found, skipping backup")
 
 def restore_tls_secret():
     if not os.path.exists(_TLS_BACKUP_FILE) or os.path.getsize(_TLS_BACKUP_FILE) == 0:
@@ -253,6 +262,10 @@ def restore_tls_secret():
     ret = cmd(f"{KUBECTL} apply -f {_TLS_BACKUP_FILE}", exit_on_error=False)
     if ret == 0:
         print(" TLS secret restored from backup")
+        # Also restore the Certificate resource if backup exists
+        if os.path.exists(_TLS_CERT_BACKUP_FILE) and os.path.getsize(_TLS_CERT_BACKUP_FILE) > 0:
+            cmd(f"{KUBECTL} apply -f {_TLS_CERT_BACKUP_FILE}", exit_on_error=False)
+            print(" TLS Certificate restored from backup")
         return True
     return False
 
@@ -400,7 +413,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     cmd("minikube kubectl -- create priorityclass core-applications --value=900 --description='Priority class for core applications' || true")
 
     if USE_MINIKUBE:
-        cmd("minikube ssh -- 'sudo rm -f /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
+        cmd("minikube ssh -- 'sudo rm -rf /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
     else:
         hp = CONFIG.host_path
         cmd(f"sudo mkdir -p {hp}/keycloak/postgres-data {hp}/keycloak/themes-data {hp}/keycloak/standalone-deployments")
