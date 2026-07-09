@@ -262,10 +262,6 @@ def restore_tls_secret():
     ret = cmd(f"{KUBECTL} apply -f {_TLS_BACKUP_FILE}", exit_on_error=False)
     if ret == 0:
         print(" TLS secret restored from backup")
-        # Also restore the Certificate resource if backup exists
-        if os.path.exists(_TLS_CERT_BACKUP_FILE) and os.path.getsize(_TLS_CERT_BACKUP_FILE) > 0:
-            cmd(f"{KUBECTL} apply -f {_TLS_CERT_BACKUP_FILE}", exit_on_error=False)
-            print(" TLS Certificate restored from backup")
         return True
     return False
 
@@ -4268,6 +4264,11 @@ def install(flavor):
         CONFIG.cert_manager_available = cert_manager_available
         if not cert_manager_available:
             print("Note: Services will be configured for HTTP-only access")
+
+    # Restore Certificate resource after cert-manager CRDs exist
+    if tls_restored and os.path.exists(_TLS_CERT_BACKUP_FILE) and os.path.getsize(_TLS_CERT_BACKUP_FILE) > 0:
+        cmd(f"{KUBECTL} apply -f {_TLS_CERT_BACKUP_FILE}", exit_on_error=False)
+        print(" TLS Certificate restored from backup")
 
     # Create main Gateway if using Gateway API (after cert-manager is available)
     if use_gateway_api:
