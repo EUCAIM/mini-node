@@ -257,12 +257,38 @@ def restore_tls_secret():
             content = f.read()
             if not content.strip():
                 return False
-    except:
+        doc = yaml.safe_load(content)
+    except Exception as e:
+        print(f"  Could not parse TLS backup: {e}")
         return False
-    ret = cmd(f"{KUBECTL} apply -f {_TLS_BACKUP_FILE}", exit_on_error=False)
+
+    # Strip server-managed metadata fields that cause kubectl apply/replace conflicts.
+    # kubectl get -o yaml embeds resourceVersion, uid, etc. which must be removed before re-applying.
+    meta = doc.get('metadata', {}) or {}
+    for field in ('resourceVersion', 'uid', 'creationTimestamp', 'generation',
+                  'managedFields', 'selfLink'):
+        meta.pop(field, None)
+    ann = meta.get('annotations') or {}
+    ann.pop('kubectl.kubernetes.io/last-applied-configuration', None)
+    doc.pop('status', None)
+
+    # Ensure the target namespace exists (it may not have been created yet at this stage).
+    ns = meta.get('namespace', 'default')
+    cmd(f"{KUBECTL} create namespace {ns}", exit_on_error=False)
+
+    # Write the cleaned secret to a temp file and apply it.
+    tmp_path = "/tmp/mininode-tls-restore.yaml"
+    with open(tmp_path, 'w') as f:
+        yaml.safe_dump(doc, f, sort_keys=False)
+
+    ret = cmd(f"{KUBECTL} apply -f {tmp_path}", exit_on_error=False)
+    if ret != 0:
+        # Fallback: replace works when the resource already exists with conflicting metadata.
+        ret = cmd(f"{KUBECTL} replace -f {tmp_path}", exit_on_error=False)
     if ret == 0:
-        print(" TLS secret restored from backup")
+        print(f" TLS secret restored from backup (namespace: {ns})")
         return True
+    print(f"  Failed to restore TLS secret (will fall back to cert-manager)")
     return False
 
 ## Update YAML files
@@ -1833,18 +1859,30 @@ def install_guacamole(CONFIG: Config, guacamole_user_creator_password: str, auth
             print("  Warning: Guacamole pod did not reach Running state in time")
         cmd("sleep 30")
 
-        # Create admin group and eucaim-user-creator user using guacli
+        # Create admin group and eucaim-user-creator user using guacli.
+        # Use kubectl port-forward so guacli connects to Guacamole via the internal cluster service
+        # (HTTP, no TLS needed) instead of the public HTTPS URL which may not be available yet.
         print(f" Creating Guacamole admin group and user-creator...")
-        _guac_url = shlex.quote(f"https://{CONFIG.public_domain}/guacamole/")
         _guac_user = shlex.quote(adminUsername)
         _guac_pass = shlex.quote(adminLocalPassword)
         _creator_pass = shlex.quote(guacamole_user_creator_password)
-        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
-            f" create admin-group cloud-services-and-security-management", exit_on_error=False)
-        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
-            f" create admin-user eucaim-user-creator --new-user-password {_creator_pass}", exit_on_error=False)
-        cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
-            f" create admin-user service-account-kubernetes-operator --new-user-password {_creator_pass}", exit_on_error=False)
+        _pf_port = 58088
+        _pf_cmd = f"{KUBECTL} port-forward -n guacamole svc/guacamole-guacamole {_pf_port}:80"
+        print(f" Starting port-forward to Guacamole on localhost:{_pf_port}...")
+        _pf_proc = subprocess.Popen(_pf_cmd, shell=True,
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(3)
+        _guac_url = shlex.quote(f"http://localhost:{_pf_port}/guacamole/")
+        try:
+            cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+                f" create admin-group cloud-services-and-security-management", exit_on_error=False)
+            cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+                f" create admin-user eucaim-user-creator --new-user-password {_creator_pass}", exit_on_error=False)
+            cmd(f"{guacli_path} --url {_guac_url} --user {_guac_user} --password {_guac_pass}"
+                f" create admin-user service-account-kubernetes-operator --new-user-password {_creator_pass}", exit_on_error=False)
+        finally:
+            _pf_proc.terminate()
+            _pf_proc.wait()
 
     finally:
         os.chdir(prev_dir)
