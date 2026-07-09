@@ -86,7 +86,7 @@ Some repositories must be cloned manually before running the installation:
 - **jobman** — job manager service *(cloned inside k8s-deploy-node)*
   ```bash
   cd k8s-deploy-node
-  git clone --depth 1 --branch v2.2.5 https://github.com/EUCAIM/jobman.git
+  git clone --depth 1 --branch v2.2.6 https://github.com/EUCAIM/jobman.git
   ```
 
 - **dataset-explorer** — web frontend *(cloned inside k8s-deploy-node)*
