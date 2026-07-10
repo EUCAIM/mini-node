@@ -16,17 +16,17 @@
       "annotations": [
           {
               "key": "chaimeleon.eu/persistentHomeMountPoint",
-              "value": "/home/chaimeleon/persistent-home",
+              "value": "/home/ds/persistent-home",
               "valueType": "string"
           },
           {
               "key": "chaimeleon.eu/persistentSharedFolderMountPoint",
-              "value": "/home/chaimeleon/persistent-shared-folder",
+              "value": "/home/ds/persistent-shared-folder",
               "valueType": "string"
           },
           {
               "key": "chaimeleon.eu/datasetsMountPoint",
-              "value": "/home/chaimeleon/datasets",
+              "value": "/home/ds/datasets",
               "valueType": "string"
           }
       ],
@@ -125,24 +125,9 @@
   },
   "harborProjects": [
       {
-          "name": "chaimeleon-library-batch-public",
+          "name": "library-batch-public",
           "token": null,
-          "baseUrl": "https://harbor.chaimeleon-eu.i3m.upv.es"
-      },
-      {
-          "name": "chaimeleon-library-batch",
-          "token": null,
-          "baseUrl": "https://harbor.chaimeleon-eu.i3m.upv.es:5000"
-      },
-      {
-          "name": "chaimeleon-library-batch-protected",
-          "token": "",
-          "baseUrl": "https://harbor.chaimeleon-eu.i3m.upv.es",
-          "imagePullSecrets": [
-            {
-                "name": "protected-regcred"
-            }
-          ]
+          "baseUrl": "https://harbor.eucaim-node.i3m.upv.es"
       }
   ],
   "oidc": {
