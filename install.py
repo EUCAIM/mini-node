@@ -24,8 +24,8 @@ K8S_DEPLOY_NODE_REPO = "git@github.com:EUCAIM/k8s-deploy-node.git"
 CONFIG = None
 
 # Deployment target: minikube (default) or real K8s cluster (set via --k8s flag)
-KUBECTL = "minikube kubectl --" 
-USE_MINIKUBE = True              
+KUBECTL = "minikube kubectl --"
+USE_MINIKUBE = True
 
 def _localize_minikube(command):
     '''Convert a minikube ssh/cp command to a local equivalent using CONFIG.host_path.
@@ -136,7 +136,9 @@ def _storage_class_exists(sc_name: str) -> bool:
     """Return True when the given storage class exists in the cluster."""
     if not sc_name:
         return False
-    out = cmd_output(f"kubectl get storageclass {shlex.quote(sc_name)} -o name 2>/dev/null")
+    # Use KUBECTL (not bare 'kubectl') so this works in minikube mode.
+    # _prepare_command() only substitutes 'minikube kubectl --', not plain 'kubectl'.
+    out = cmd_output(f"{KUBECTL} get storageclass {shlex.quote(sc_name)} -o name 2>/dev/null")
     return bool((out or "").strip())
 
 
@@ -149,11 +151,14 @@ def _detect_storage_class():
     """
     preferred = "standard" if USE_MINIKUBE else "managed-nfs-storage"
 
+    # Use KUBECTL (not bare 'kubectl') so this works in minikube mode.
     default_sc = _normalize_storage_class_name(cmd_output(
-        "kubectl get storageclass -o jsonpath='{.items[?(@.metadata.annotations.storageclass\\.kubernetes\\.io/is-default-class==\"true\")].metadata.name}' 2>/dev/null"
+        f"{KUBECTL} get storageclass"
+        " -o jsonpath='{.items[?(@.metadata.annotations.storageclass\\.kubernetes\\.io/is-default-class==\"true\")].metadata.name}'"
+        " 2>/dev/null"
     ))
     first_sc = _normalize_storage_class_name(cmd_output(
-        "kubectl get storageclass -o jsonpath='{.items[0].metadata.name}' 2>/dev/null"
+        f"{KUBECTL} get storageclass -o jsonpath='{{.items[0].metadata.name}}' 2>/dev/null"
     ))
 
     if _storage_class_exists(preferred):
@@ -224,15 +229,25 @@ def get_tls_secret_name():
 _TLS_SECRET_NAME = "mininode-tls"
 _TLS_CERT_BACKUP_FILE = os.path.join(SCRIPT_DIR, "mininode-tls-cert-backup.yaml")
 
+
+def _tls_backup_exists() -> bool:
+    return os.path.exists(_TLS_BACKUP_FILE) and os.path.getsize(_TLS_BACKUP_FILE) > 0
+
 def save_tls_secret():
     secret_name = get_tls_secret_name()
-    for ns in ("keycloak", "default", "cert-manager"):
-        exists = os.system(f"{KUBECTL} get secret {secret_name} -n {ns} -o name > /dev/null 2>&1") >> 8
-        if exists == 0:
-            break
-    else:
-        print(f" TLS secret '{secret_name}' not found, skipping backup")
-        return
+    # Wait for the secret to be created by cert-manager (up to 120s)
+    for attempt in range(12):
+        for ns in ("keycloak", "default", "cert-manager"):
+            exists = os.system(f"{KUBECTL} get secret {secret_name} -n {ns} -o name > /dev/null 2>&1") >> 8
+            if exists == 0:
+                break
+        else:
+            if attempt < 11:
+                time.sleep(10)
+                continue
+            print(f" TLS secret '{secret_name}' not found after 120s, skipping backup")
+            return
+        break
     print(f" Found '{secret_name}' in namespace {ns}, saving...")
     saved = os.system(f"{KUBECTL} get secret {secret_name} -n {ns} -o yaml > {_TLS_BACKUP_FILE}") >> 8
     if saved == 0 and os.path.getsize(_TLS_BACKUP_FILE) > 0:
@@ -273,9 +288,9 @@ def restore_tls_secret():
     doc.pop('status', None)
 
     # Ensure the target namespace exists (it may not have been created yet at this stage).
-    ns = meta.get('namespace', 'default')
-    cmd(f"{KUBECTL} create namespace {ns}", exit_on_error=False)
-
+    #ns = meta.get('namespace', 'default')
+ #   cmd(f"{KUBECTL} create namespace {ns}", exit_on_error=False)
+    cmd(f"{KUBECTL} create namespace keycloak", exit_on_error=False)
     # Write the cleaned secret to a temp file and apply it.
     tmp_path = "/tmp/mininode-tls-restore.yaml"
     with open(tmp_path, 'w') as f:
@@ -286,7 +301,7 @@ def restore_tls_secret():
         # Fallback: replace works when the resource already exists with conflicting metadata.
         ret = cmd(f"{KUBECTL} replace -f {tmp_path}", exit_on_error=False)
     if ret == 0:
-        print(f" TLS secret restored from backup (namespace: {ns})")
+        print(f" TLS secret restored from backup ")
         return True
     print(f"  Failed to restore TLS secret (will fall back to cert-manager)")
     return False
@@ -550,26 +565,41 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         if _sc:
             print(f" Using storage class: {_sc}")
         else:
-            print(" No storage class detected; preserving PVC behavior without forcing storageClassName")
-        # Update storageClassName for all PVCs
-        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
-        for d in pvc_docs:
-            if "spec" not in d:
-                d["spec"] = {}
-            if _sc:
-                d["spec"]["storageClassName"] = _sc
-            else:
-                d["spec"]["storageClassName"] = ""
-            if "metadata" not in d:
-                d["metadata"] = {}
-            d["metadata"]["namespace"] = "keycloak"
+            print(" No storage class detected; using static PV binding (storageClassName: '')")
 
-        # Save the updated PVCs to dep0_volumes.private.yaml
+        # Keep BOTH PersistentVolume and PersistentVolumeClaim documents.
+        # Stripping PVs caused PVCs to remain unbound when storageClassName was ''
+        # because there was no PV (static or dynamic) to satisfy the claim.
+        pv_docs  = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolume"]
+        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
+
+        for d in pv_docs:
+            # Strip server-managed fields that block re-apply after delete+recreate.
+            meta = d.get('metadata') or {}
+            for field in ('resourceVersion', 'uid', 'creationTimestamp',
+                          'managedFields', 'selfLink', 'generation'):
+                meta.pop(field, None)
+            d.pop('status', None)
+            # Clear claimRef.uid so the PV can rebind to the freshly created PVC.
+            claim_ref = (d.get('spec') or {}).get('claimRef') or {}
+            claim_ref.pop('uid', None)
+            claim_ref.pop('resourceVersion', None)
+            if _sc and 'spec' in d:
+                d['spec']['storageClassName'] = _sc
+
+        for d in pvc_docs:
+            d.setdefault('spec', {})
+            d['spec']['storageClassName'] = _sc if _sc else ""
+            d.setdefault('metadata', {})
+            d['metadata']['namespace'] = 'keycloak'
+
+        # Save PVs first (cluster-scoped), then PVCs (namespace-scoped)
         private_dep0 = "dep0_volumes.private.yaml"
         try:
             with open(private_dep0, "w") as pf:
-                yaml.safe_dump_all(pvc_docs, pf, sort_keys=False)
-            print(f"  Created private volumes file: {private_dep0}")
+                yaml.safe_dump_all(pv_docs + pvc_docs, pf, sort_keys=False)
+            print(f"  Created private volumes file: {private_dep0} "
+                  f"({len(pv_docs)} PVs, {len(pvc_docs)} PVCs)")
         except Exception as e:
             print(f"  Warning: could not write private file {private_dep0}: {e}")
 
@@ -581,66 +611,8 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if os.path.exists("dep1_init_volumes.yaml"):
         cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
 
-    jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
-    jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
     jar1_path = "/tmp/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_path = "/tmp/keycloak-required-action-user-validated-1.0.5.jar"
-
-    print("Downloading Keycloak extension JARs...")
-    for jar_url, jar_path in [(jar1_url, jar1_path), (jar2_url, jar2_path)]:
-        max_retries = 5
-        success = False
-
-        for attempt in range(max_retries):
-            # Remove old file if exists
-            cmd(f"rm -f {jar_path}", exit_on_error=False)
-
-            # Try wget first (with increased timeout and retries)
-            print(f"  Attempt {attempt + 1}/{max_retries}: Downloading {os.path.basename(jar_path)}...")
-            download_result = cmd(
-                f"wget --timeout=60 --tries=3 --retry-connrefused --waitretry=5 "
-                f"--user-agent='Mozilla/5.0' -O {jar_path} '{jar_url}'",
-                exit_on_error=False
-            )
-
-            # If wget fails, try curl as fallback
-            if download_result != 0:
-                print(f"    wget failed, trying curl...")
-                download_result = cmd(
-                    f"curl -L --max-time 60 --retry 3 --retry-delay 5 "
-                    f"-A 'Mozilla/5.0' -o {jar_path} '{jar_url}'",
-                    exit_on_error=False
-                )
-
-            if download_result == 0 and os.path.exists(jar_path):
-                # Verify file size (JARs should be > 5KB)
-                file_size = os.path.getsize(jar_path)
-                if file_size < 5000:
-                    print(f"    Downloaded file too small ({file_size} bytes), likely error page")
-                    continue
-
-                # Verify it's a valid ZIP/JAR file
-                verify_result = cmd(f"unzip -t {jar_path} >/dev/null 2>&1", exit_on_error=False)
-                if verify_result == 0:
-                    print(f"  Downloaded and verified: {os.path.basename(jar_path)} ({file_size} bytes)")
-                    success = True
-                    break
-                else:
-                    print(f"    File corrupted (invalid ZIP/JAR)")
-            else:
-                print(f"    Download failed")
-
-            # Wait before retry (exponential backoff)
-            if attempt < max_retries - 1:
-                wait_time = 2 ** attempt
-                print(f"    Waiting {wait_time}s before retry...")
-                time.sleep(wait_time)
-
-        if not success:
-            print(f"\n  WARNING: Could not download {os.path.basename(jar_path)} after {max_retries} attempts")
-            print(f"   URL: {jar_url}")
-            print(f"   Keycloak may not work properly without this extension")
-            print(f"   You can manually download it later and copy to /var/hostpath-provisioner/keycloak/standalone-deployments/\n")
 
     cmd("tar -czf /tmp/themes.tar.gz themes/")
     if USE_MINIKUBE:
@@ -651,22 +623,18 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         cmd(f"sudo mkdir -p {kc_dest}")
         cmd(f"sudo tar -xzf /tmp/themes.tar.gz -C {kc_dest} --strip-components=1")
 
-    # Only copy JARs if they were successfully downloaded and validated
-    if os.path.exists(jar1_path) and os.path.getsize(jar1_path) > 0:
-        if USE_MINIKUBE:
-            cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+    # Copy JARs only if they are already present locally (must be placed manually beforehand).
+    for jar_path in [jar1_path, jar2_path]:
+        jar_name = os.path.basename(jar_path)
+        if os.path.exists(jar_path) and os.path.getsize(jar_path) > 0:
+            print(f" Copying {jar_name} to standalone-deployments...")
+            if USE_MINIKUBE:
+                cmd(f"minikube cp {jar_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+            else:
+                cmd(f"sudo cp {jar_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
         else:
-            cmd(f"sudo cp {jar1_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
-    else:
-        print(f"  Warning: Skipping corrupted JAR: {jar1_path}")
-
-    if os.path.exists(jar2_path) and os.path.getsize(jar2_path) > 0:
-        if USE_MINIKUBE:
-            cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
-        else:
-            cmd(f"sudo cp {jar2_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
-    else:
-        print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
+            print(f"  Note: {jar_name} not found at {jar_path}, skipping.")
+            print(f"   Place the JAR there manually before running the installer if you need it.")
 
     realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
 
@@ -700,7 +668,39 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         cmd(f"sudo cp {realm_config_file_private_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
 
     cmd("minikube kubectl -- apply -f dep2_database.yaml -n keycloak")
-    cmd("minikube kubectl -- wait --for=condition=ready pod -l app=db -n keycloak --timeout=300s")
+
+    # Wait for the db pod to become Ready with a long timeout and clear diagnostics.
+    # 'kubectl wait' alone with exit_on_error=True would abort the whole install on timeout.
+    print("Waiting for Keycloak db pod to become Ready (up to 600s)...")
+    _db_ready = False
+    for _i in range(60):          # 60 × 10s = 600s
+        _status = cmd_output(
+            f"{KUBECTL} get pods -n keycloak -l app=db --no-headers 2>/dev/null"
+        ).strip()
+        if _status:
+            _cols = _status.split()
+            # READY column is index 1 (e.g. "1/1")
+            _ready_col = _cols[1] if len(_cols) > 1 else ""
+            _phase     = _cols[2] if len(_cols) > 2 else ""
+            if _ready_col and _ready_col.split("/")[0] == _ready_col.split("/")[-1] and _ready_col != "0/0":
+                print(f" db pod is Ready ({_ready_col})")
+                _db_ready = True
+                break
+            print(f"  db pod status: {_phase} ready={_ready_col} (attempt {_i+1}/60)")
+            if _phase in ("CrashLoopBackOff", "Error", "OOMKilled", "ImagePullBackOff", "ErrImagePull"):
+                print(f"  db pod entered terminal state '{_phase}', printing logs for diagnosis:")
+                cmd(f"{KUBECTL} logs -n keycloak -l app=db --tail=40", exit_on_error=False)
+                cmd(f"{KUBECTL} describe pod -n keycloak -l app=db", exit_on_error=False)
+                break
+        time.sleep(10)
+
+    if not _db_ready:
+        print("  WARNING: Keycloak db pod did not become Ready within 600s.")
+        print("  Printing pod events and last logs for diagnosis:")
+        cmd(f"{KUBECTL} describe pod -n keycloak -l app=db", exit_on_error=False)
+        cmd(f"{KUBECTL} logs -n keycloak -l app=db --tail=60", exit_on_error=False)
+        print("  Continuing installation — Keycloak may fail to start if db is not ready.")
+
     cmd("sleep 30")
 
     cmd(f"minikube kubectl -- apply -f {keycloak_deploy_file} -n keycloak")
@@ -1202,14 +1202,20 @@ def install_dataset_service(auth_client_secret: str):
             # LEGACY: Traditional Ingress (commented but functional)
             print(f"\n Configuring ingress for dataset-service (LEGACY)...")
             update_ingress_host("3-ingress.yaml", CONFIG.public_domain)
-            cmd("minikube kubectl -- apply -f 3-ingress.yaml -n dataset-service")
+            _ret = cmd("minikube kubectl -- apply -f 3-ingress.yaml -n dataset-service", exit_on_error=False)
+            if _ret != 0:
+                print("  Webhook not ready, retrying with --validate=false...")
+                cmd("minikube kubectl -- apply -f 3-ingress.yaml -n dataset-service --validate=false", exit_on_error=False)
             print(f" Ingress applied for dataset-service at https://{CONFIG.public_domain}/dataset-service")
 
             redirect_ingress_file = "4-ingress-for-redirect-from-root-path.yaml"
             if os.path.exists(redirect_ingress_file):
                 update_ingress_host(redirect_ingress_file, CONFIG.public_domain)
 
-                cmd("minikube kubectl -- apply -f 4-ingress-for-redirect-from-root-path.yaml -n dataset-service")
+                _ret2 = cmd("minikube kubectl -- apply -f 4-ingress-for-redirect-from-root-path.yaml -n dataset-service", exit_on_error=False)
+                if _ret2 != 0:
+                    print("  Webhook not ready, retrying with --validate=false...")
+                    cmd("minikube kubectl -- apply -f 4-ingress-for-redirect-from-root-path.yaml -n dataset-service --validate=false", exit_on_error=False)
                 print(" Redirect ingress applied")
 
         print(f"\n Waiting for dataset-service-backend deployment to be ready...")
@@ -2707,26 +2713,33 @@ def install_api_gateway(CONFIG):
         print(f"Warning: Gateway manifest not found at {gateway_file}")
         return False
 
-    # Update hostname in the Gateway manifest
-    def update_gateway_hostname(docs):
-        updated = False
-        for doc in docs:
-            if doc.get("kind") == "Gateway":
-                for listener in doc["spec"].get("listeners", []):
-                    if "hostname" in listener:
-                        listener["hostname"] = CONFIG.public_domain
-                        updated = True
-            elif doc.get("kind") == "Certificate":
-                if "dnsNames" in doc["spec"]:
-                    doc["spec"]["dnsNames"] = [CONFIG.public_domain]
-                    updated = True
-        return updated
+    preserve_existing_tls = _tls_backup_exists()
 
-    # Update the manifest with the correct domain
-    result_gateway = update_yaml_config(gateway_file, update_gateway_hostname)
-    if result_gateway:
-        # If result is a string, it's the edited file path
-        gateway_file = result_gateway if isinstance(result_gateway, str) else gateway_file
+    # Update the manifest with the correct domain.
+    # If a TLS backup already exists, skip the Certificate resource entirely so
+    # cert-manager cannot reconcile it and re-issue a different secret.
+    with open(gateway_file, 'r') as f:
+        docs = list(yaml.safe_load_all(f))
+
+    updated_docs = []
+    for doc in docs:
+        if not isinstance(doc, dict):
+            continue
+        if doc.get("kind") == "Gateway":
+            for listener in doc.get("spec", {}).get("listeners", []):
+                if "hostname" in listener:
+                    listener["hostname"] = CONFIG.public_domain
+        elif doc.get("kind") == "Certificate":
+            if preserve_existing_tls:
+                print(" Preserving existing TLS secret: skipping Certificate resource")
+                continue
+            if "dnsNames" in doc.get("spec", {}):
+                doc["spec"]["dnsNames"] = [CONFIG.public_domain]
+        updated_docs.append(doc)
+
+    gateway_file = "/tmp/main-gateway.yaml"
+    with open(gateway_file, 'w') as f:
+        yaml.safe_dump_all(updated_docs, f, sort_keys=False)
     print(f" Updated Gateway hostname to: {CONFIG.public_domain}")
 
     # Apply the Gateway manifest
@@ -3156,6 +3169,8 @@ def create_main_gateway(domain: str, use_tls: bool = True):
     '''Create the main Gateway resource'''
     print(f"Creating main Gateway for domain: {domain}...")
 
+    preserve_existing_tls = _tls_backup_exists()
+
     gateway_yaml = (
         "\n"
         "apiVersion: gateway.networking.k8s.io/v1\n"
@@ -3190,22 +3205,25 @@ def create_main_gateway(domain: str, use_tls: bool = True):
             "        namespaces:\n"
             "          from: All\n"
         )
-        gateway_yaml += (
-            "---\n"
-            "apiVersion: cert-manager.io/v1\n"
-            "kind: Certificate\n"
-            "metadata:\n"
-            f"  name: {_TLS_SECRET_NAME}-cert\n"
-            "  namespace: default\n"
-            "spec:\n"
-            f"  secretName: {_TLS_SECRET_NAME}\n"
-            "  commonName: " + domain + "\n"
-            "  dnsNames:\n"
-            f"    - {domain}\n"
-            "  issuerRef:\n"
-            "    name: letsencrypt-prod\n"
-            "    kind: ClusterIssuer\n"
-        )
+        if not preserve_existing_tls:
+            gateway_yaml += (
+                "---\n"
+                "apiVersion: cert-manager.io/v1\n"
+                "kind: Certificate\n"
+                "metadata:\n"
+                f"  name: {_TLS_SECRET_NAME}-cert\n"
+                "  namespace: default\n"
+                "spec:\n"
+                f"  secretName: {_TLS_SECRET_NAME}\n"
+                "  commonName: " + domain + "\n"
+                "  dnsNames:\n"
+                f"    - {domain}\n"
+                "  issuerRef:\n"
+                "    name: letsencrypt-prod\n"
+                "    kind: ClusterIssuer\n"
+            )
+        else:
+            print(" Preserving existing TLS secret: not generating a Certificate resource")
 
     # Write to temp file and apply
     gateway_file = "/tmp/main-gateway.yaml"
@@ -3898,7 +3916,9 @@ def install_orthanc(CONFIG):
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
         # Populate orthanc-wrapper payload from fixed tar file in repo.
         # Expected input: k8s-deploy-node/orthanc/orthanc-wrapper.tar.gz
-        wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
+        wrapper_repo_tar = os.path.join(orthanc_dir, "wrapper", "orthanc-wrapper.tar.gz")
+        if not os.path.isfile(wrapper_repo_tar):
+            wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
 
         wrapper_payload_available = False
 
@@ -4183,7 +4203,7 @@ def install_clinical_data_sql_db():
     '''Install Clinical Data SQL DB - deploys PostgreSQL database for clinical data'''
     if CONFIG is None:
         raise Exception("CONFIG is None")
-    
+
     print(f"\n{'='*80}")
     print(" Installing Clinical Data SQL DB")
     print(f"{'='*80}\n")
@@ -4191,12 +4211,12 @@ def install_clinical_data_sql_db():
     prev_dir = os.getcwd()
     try:
         clinical_db_dir = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "clinical-data-sql-db")
-        
+
         if not os.path.exists(clinical_db_dir):
             print(f"  Warning: clinical-data-sql-db directory not found at {clinical_db_dir}")
             print(f"  Skipping clinical-data-sql-db installation")
             return
-        
+
         os.chdir(clinical_db_dir)
 
         # Create namespace
@@ -4220,11 +4240,11 @@ def install_clinical_data_sql_db():
         if os.path.exists(db_service_file):
             print(f" Injecting PostgreSQL password from config into {db_service_file}...")
             result_db = update_postgres_password(db_service_file, CONFIG.postgres.db_password)
-            
+
             # Use the private file if it was created
             if result_db and isinstance(result_db, str):
                 db_service_file = result_db
-            
+
             # Apply database deployment and service
             print(f" Applying database deployment and service ({db_service_file})...")
             cmd(f"minikube kubectl -- apply -n clinical-data-sql-db -f {db_service_file}")
