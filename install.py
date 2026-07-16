@@ -3872,36 +3872,28 @@ def install_orthanc(CONFIG):
         wrapper_payload_available = False
 
         if USE_MINIKUBE:
-            wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
+            wrapper_scripts_dir = os.path.join(orthanc_dir, "wrapper")
+            wrapper_target = "/var/hostpath-provisioner/orthanc/orthanc-wrapper"
             if os.path.isfile(wrapper_repo_tar):
-                print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
-                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
+                print(f" Found orthanc-wrapper payload: {wrapper_repo_tar}")
+                # Copy standalone scripts (init_node.sh, restart_node_server.sh, etc.)
+                print(" Copying wrapper scripts...")
+                cmd(f"minikube ssh -- 'sudo mkdir -p {wrapper_target}'")
+                for script in ["init_node.sh", "restart_node_server.sh", "update_app.sh", "app.json"]:
+                    script_path = os.path.join(wrapper_scripts_dir, script)
+                    if os.path.isfile(script_path):
+                        cmd(f"minikube cp {shlex.quote(script_path)} minikube:{wrapper_target}/{script}")
+                # Copy and extract bundle into target/bundle/
+                print(" Copying and extracting bundle...")
+                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:/tmp/orthanc-wrapper-bundle.tar.gz")
                 cmd(
-                    "minikube ssh -- '"
-                    "set -e; "
-                    "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
-                    "TMP=/tmp/orthanc-wrapper-seed-unpack; "
-                    "sudo mkdir -p $TARGET; "
-                    "sudo rm -rf $TMP; "
-                    "sudo mkdir -p $TMP; "
-                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
-                    "if [ -f $TMP/init_node.sh ]; then "
-                    "  SRC=$TMP; "
-                    "elif [ -f $TMP/wrapper/init_node.sh ]; then "
-                    "  SRC=$TMP/wrapper; "
-                    "else "
-                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f -name init_node.sh | head -n1); "
-                    "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
-                    "fi; "
-                    "sudo rm -rf $TARGET/*; "
-                    "sudo cp -a $SRC/. $TARGET/; "
-                    "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
-                    "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
-                    "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
-                    "sudo chmod -R 755 $TARGET'"
+                    f"minikube ssh -- '"
+                    f"sudo mkdir -p {wrapper_target}/bundle && "
+                    f"sudo tar -xzf /tmp/orthanc-wrapper-bundle.tar.gz "
+                    f"  -C {wrapper_target}/bundle --strip-components=1 && "
+                    f"sudo rm -f /tmp/orthanc-wrapper-bundle.tar.gz'"
                 )
-                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
-                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
+                cmd(f"minikube ssh -- 'sudo chmod +x {wrapper_target}/init_node.sh {wrapper_target}/restart_node_server.sh {wrapper_target}/update_app.sh 2>/dev/null || true; sudo chmod -R 755 {wrapper_target}'")
             else:
                 print(
                     "  Warning: orthanc-wrapper payload not found. "
@@ -3910,7 +3902,7 @@ def install_orthanc(CONFIG):
 
             wrapper_payload_available = (
                 cmd(
-                    "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh'",
+                    f"minikube ssh -- 'test -f {wrapper_target}/init_node.sh'",
                     exit_on_error=False,
                 ) == 0
             )
