@@ -611,8 +611,66 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if os.path.exists("dep1_init_volumes.yaml"):
         cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
 
+    jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
+    jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
     jar1_path = "/tmp/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_path = "/tmp/keycloak-required-action-user-validated-1.0.5.jar"
+
+    print("Downloading Keycloak extension JARs...")
+    for jar_url, jar_path in [(jar1_url, jar1_path), (jar2_url, jar2_path)]:
+        max_retries = 5
+        success = False
+
+        for attempt in range(max_retries):
+            # Remove old file if exists
+            cmd(f"rm -f {jar_path}", exit_on_error=False)
+
+            # Try wget first (with increased timeout and retries)
+            print(f"  Attempt {attempt + 1}/{max_retries}: Downloading {os.path.basename(jar_path)}...")
+            download_result = cmd(
+                f"wget --timeout=60 --tries=3 --retry-connrefused --waitretry=5 "
+                f"--user-agent='Mozilla/5.0' -O {jar_path} '{jar_url}'",
+                exit_on_error=False
+            )
+
+            # If wget fails, try curl as fallback
+            if download_result != 0:
+                print(f"    wget failed, trying curl...")
+                download_result = cmd(
+                    f"curl -L --max-time 60 --retry 3 --retry-delay 5 "
+                    f"-A 'Mozilla/5.0' -o {jar_path} '{jar_url}'",
+                    exit_on_error=False
+                )
+
+            if download_result == 0 and os.path.exists(jar_path):
+                # Verify file size (JARs should be > 5KB)
+                file_size = os.path.getsize(jar_path)
+                if file_size < 5000:
+                    print(f"    Downloaded file too small ({file_size} bytes), likely error page")
+                    continue
+
+                # Verify it's a valid ZIP/JAR file
+                verify_result = cmd(f"unzip -t {jar_path} >/dev/null 2>&1", exit_on_error=False)
+                if verify_result == 0:
+                    print(f"  Downloaded and verified: {os.path.basename(jar_path)} ({file_size} bytes)")
+                    success = True
+                    break
+                else:
+                    print(f"    File corrupted (invalid ZIP/JAR)")
+            else:
+                print(f"    Download failed")
+
+            # Wait before retry (exponential backoff)
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"    Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+
+        if not success:
+            print(f"\n  WARNING: Could not download {os.path.basename(jar_path)} after {max_retries} attempts")
+            print(f"   URL: {jar_url}")
+            print(f"   Keycloak may not work properly without this extension")
+            print(f"   You can manually download it later and copy to /var/hostpath-provisioner/keycloak/standalone-deployments/\n")
 
     cmd("tar -czf /tmp/themes.tar.gz themes/")
     if USE_MINIKUBE:
@@ -623,18 +681,22 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         cmd(f"sudo mkdir -p {kc_dest}")
         cmd(f"sudo tar -xzf /tmp/themes.tar.gz -C {kc_dest} --strip-components=1")
 
-    # Copy JARs only if they are already present locally (must be placed manually beforehand).
-    for jar_path in [jar1_path, jar2_path]:
-        jar_name = os.path.basename(jar_path)
-        if os.path.exists(jar_path) and os.path.getsize(jar_path) > 0:
-            print(f" Copying {jar_name} to standalone-deployments...")
-            if USE_MINIKUBE:
-                cmd(f"minikube cp {jar_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
-            else:
-                cmd(f"sudo cp {jar_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+    # Only copy JARs if they were successfully downloaded and validated
+    if os.path.exists(jar1_path) and os.path.getsize(jar1_path) > 0:
+        if USE_MINIKUBE:
+            cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
         else:
-            print(f"  Note: {jar_name} not found at {jar_path}, skipping.")
-            print(f"   Place the JAR there manually before running the installer if you need it.")
+            cmd(f"sudo cp {jar1_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+    else:
+        print(f"  Warning: Skipping corrupted JAR: {jar1_path}")
+
+    if os.path.exists(jar2_path) and os.path.getsize(jar2_path) > 0:
+        if USE_MINIKUBE:
+            cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+        else:
+            cmd(f"sudo cp {jar2_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+    else:
+        print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
 
     realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
 
@@ -4312,18 +4374,13 @@ def install(flavor):
     # Try to restore TLS secret from backup (survives minikube delete)
     tls_restored = restore_tls_secret()
 
-    if tls_restored:
-        cert_manager_available = True
-        CONFIG.cert_manager_available = True
-        print(" Skipping cert-manager install (using restored TLS secret)")
-    else:
-        # Install cert-manager (needed for TLS certificates)
-        cert_manager_available = install_cert_manager(CONFIG)
-        CONFIG.cert_manager_available = cert_manager_available
-        if not cert_manager_available:
-            print("Note: Services will be configured for HTTP-only access")
+    # Always install cert-manager so its CRDs exist (required for Certificate resources)
+    cert_manager_available = install_cert_manager(CONFIG)
+    CONFIG.cert_manager_available = cert_manager_available
+    if not cert_manager_available:
+        print("Note: Services will be configured for HTTP-only access")
 
-    # Restore Certificate resource after cert-manager CRDs exist
+    # Restore Certificate resource from backup if available (so cert-manager doesn't re-issue)
     if tls_restored and os.path.exists(_TLS_CERT_BACKUP_FILE) and os.path.getsize(_TLS_CERT_BACKUP_FILE) > 0:
         cmd(f"{KUBECTL} apply -f {_TLS_CERT_BACKUP_FILE}", exit_on_error=False)
         print(" TLS Certificate restored from backup")
