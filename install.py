@@ -550,7 +550,8 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     # Apply PVC manifests for dataset-service if present (do not replace storageClassName)
 
 
-    # Apply static Keycloak PVs + PVCs directly from dep0_volumes.yaml
+    # Always ensure Keycloak volumes (PV + namespaced PVCs) are applied when available
+    # This creates the Keycloak PVs and the namespaced PVCs like `postgres-data`.
     if os.path.exists("dep0_volumes.yaml"):
         print(" Applying dep0_volumes.yaml for Keycloak volumes (pv + pvc) with a cluster-detected storageClassName")
         # Read file and extract only PersistentVolumeClaim documents
@@ -564,26 +565,41 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         if _sc:
             print(f" Using storage class: {_sc}")
         else:
-            print(" No storage class detected; preserving PVC behavior without forcing storageClassName")
-        # Update storageClassName for all PVCs
-        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
-        for d in pvc_docs:
-            if "spec" not in d:
-                d["spec"] = {}
-            if _sc:
-                d["spec"]["storageClassName"] = _sc
-            else:
-                d["spec"]["storageClassName"] = ""
-            if "metadata" not in d:
-                d["metadata"] = {}
-            d["metadata"]["namespace"] = "keycloak"
+            print(" No storage class detected; using static PV binding (storageClassName: '')")
 
-        # Save the updated PVCs to dep0_volumes.private.yaml
+        # Keep BOTH PersistentVolume and PersistentVolumeClaim documents.
+        # Stripping PVs caused PVCs to remain unbound when storageClassName was ''
+        # because there was no PV (static or dynamic) to satisfy the claim.
+        pv_docs  = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolume"]
+        pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
+
+        for d in pv_docs:
+            # Strip server-managed fields that block re-apply after delete+recreate.
+            meta = d.get('metadata') or {}
+            for field in ('resourceVersion', 'uid', 'creationTimestamp',
+                          'managedFields', 'selfLink', 'generation'):
+                meta.pop(field, None)
+            d.pop('status', None)
+            # Clear claimRef.uid so the PV can rebind to the freshly created PVC.
+            claim_ref = (d.get('spec') or {}).get('claimRef') or {}
+            claim_ref.pop('uid', None)
+            claim_ref.pop('resourceVersion', None)
+            if _sc and 'spec' in d:
+                d['spec']['storageClassName'] = _sc
+
+        for d in pvc_docs:
+            d.setdefault('spec', {})
+            d['spec']['storageClassName'] = _sc if _sc else ""
+            d.setdefault('metadata', {})
+            d['metadata']['namespace'] = 'keycloak'
+
+        # Save PVs first (cluster-scoped), then PVCs (namespace-scoped)
         private_dep0 = "dep0_volumes.private.yaml"
         try:
             with open(private_dep0, "w") as pf:
-                yaml.safe_dump_all(pvc_docs, pf, sort_keys=False)
-            print(f"  Created private volumes file: {private_dep0}")
+                yaml.safe_dump_all(pv_docs + pvc_docs, pf, sort_keys=False)
+            print(f"  Created private volumes file: {private_dep0} "
+                  f"({len(pv_docs)} PVs, {len(pvc_docs)} PVCs)")
         except Exception as e:
             print(f"  Warning: could not write private file {private_dep0}: {e}")
 
@@ -595,8 +611,66 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if os.path.exists("dep1_init_volumes.yaml"):
         cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
 
+    jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
+    jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
     jar1_path = "/tmp/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_path = "/tmp/keycloak-required-action-user-validated-1.0.5.jar"
+
+    print("Downloading Keycloak extension JARs...")
+    for jar_url, jar_path in [(jar1_url, jar1_path), (jar2_url, jar2_path)]:
+        max_retries = 5
+        success = False
+
+        for attempt in range(max_retries):
+            # Remove old file if exists
+            cmd(f"rm -f {jar_path}", exit_on_error=False)
+
+            # Try wget first (with increased timeout and retries)
+            print(f"  Attempt {attempt + 1}/{max_retries}: Downloading {os.path.basename(jar_path)}...")
+            download_result = cmd(
+                f"wget --timeout=60 --tries=3 --retry-connrefused --waitretry=5 "
+                f"--user-agent='Mozilla/5.0' -O {jar_path} '{jar_url}'",
+                exit_on_error=False
+            )
+
+            # If wget fails, try curl as fallback
+            if download_result != 0:
+                print(f"    wget failed, trying curl...")
+                download_result = cmd(
+                    f"curl -L --max-time 60 --retry 3 --retry-delay 5 "
+                    f"-A 'Mozilla/5.0' -o {jar_path} '{jar_url}'",
+                    exit_on_error=False
+                )
+
+            if download_result == 0 and os.path.exists(jar_path):
+                # Verify file size (JARs should be > 5KB)
+                file_size = os.path.getsize(jar_path)
+                if file_size < 5000:
+                    print(f"    Downloaded file too small ({file_size} bytes), likely error page")
+                    continue
+
+                # Verify it's a valid ZIP/JAR file
+                verify_result = cmd(f"unzip -t {jar_path} >/dev/null 2>&1", exit_on_error=False)
+                if verify_result == 0:
+                    print(f"  Downloaded and verified: {os.path.basename(jar_path)} ({file_size} bytes)")
+                    success = True
+                    break
+                else:
+                    print(f"    File corrupted (invalid ZIP/JAR)")
+            else:
+                print(f"    Download failed")
+
+            # Wait before retry (exponential backoff)
+            if attempt < max_retries - 1:
+                wait_time = 2 ** attempt
+                print(f"    Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+
+        if not success:
+            print(f"\n  WARNING: Could not download {os.path.basename(jar_path)} after {max_retries} attempts")
+            print(f"   URL: {jar_url}")
+            print(f"   Keycloak may not work properly without this extension")
+            print(f"   You can manually download it later and copy to /var/hostpath-provisioner/keycloak/standalone-deployments/\n")
 
     cmd("tar -czf /tmp/themes.tar.gz themes/")
     if USE_MINIKUBE:
@@ -607,18 +681,22 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         cmd(f"sudo mkdir -p {kc_dest}")
         cmd(f"sudo tar -xzf /tmp/themes.tar.gz -C {kc_dest} --strip-components=1")
 
-    # Copy JARs only if they are already present locally (must be placed manually beforehand).
-    for jar_path in [jar1_path, jar2_path]:
-        jar_name = os.path.basename(jar_path)
-        if os.path.exists(jar_path) and os.path.getsize(jar_path) > 0:
-            print(f" Copying {jar_name} to standalone-deployments...")
-            if USE_MINIKUBE:
-                cmd(f"minikube cp {jar_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
-            else:
-                cmd(f"sudo cp {jar_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+    # Only copy JARs if they were successfully downloaded and validated
+    if os.path.exists(jar1_path) and os.path.getsize(jar1_path) > 0:
+        if USE_MINIKUBE:
+            cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
         else:
-            print(f"  Note: {jar_name} not found at {jar_path}, skipping.")
-            print(f"   Place the JAR there manually before running the installer if you need it.")
+            cmd(f"sudo cp {jar1_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+    else:
+        print(f"  Warning: Skipping corrupted JAR: {jar1_path}")
+
+    if os.path.exists(jar2_path) and os.path.getsize(jar2_path) > 0:
+        if USE_MINIKUBE:
+            cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
+        else:
+            cmd(f"sudo cp {jar2_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+    else:
+        print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
 
     realm_config_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.json")
 
@@ -3907,28 +3985,36 @@ def install_orthanc(CONFIG):
         wrapper_payload_available = False
 
         if USE_MINIKUBE:
-            wrapper_scripts_dir = os.path.join(orthanc_dir, "wrapper")
-            wrapper_target = "/var/hostpath-provisioner/orthanc/orthanc-wrapper"
+            wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
             if os.path.isfile(wrapper_repo_tar):
-                print(f" Found orthanc-wrapper payload: {wrapper_repo_tar}")
-                # Copy standalone scripts (init_node.sh, restart_node_server.sh, etc.)
-                print(" Copying wrapper scripts...")
-                cmd(f"minikube ssh -- 'sudo mkdir -p {wrapper_target}'")
-                for script in ["init_node.sh", "restart_node_server.sh", "update_app.sh", "app.json"]:
-                    script_path = os.path.join(wrapper_scripts_dir, script)
-                    if os.path.isfile(script_path):
-                        cmd(f"minikube cp {shlex.quote(script_path)} minikube:{wrapper_target}/{script}")
-                # Copy and extract bundle into target/bundle/
-                print(" Copying and extracting bundle...")
-                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:/tmp/orthanc-wrapper-bundle.tar.gz")
+                print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
+                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
                 cmd(
-                    f"minikube ssh -- '"
-                    f"sudo mkdir -p {wrapper_target}/bundle && "
-                    f"sudo tar -xzf /tmp/orthanc-wrapper-bundle.tar.gz "
-                    f"  -C {wrapper_target}/bundle --strip-components=1 && "
-                    f"sudo rm -f /tmp/orthanc-wrapper-bundle.tar.gz'"
+                    "minikube ssh -- '"
+                    "set -e; "
+                    "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
+                    "TMP=/tmp/orthanc-wrapper-seed-unpack; "
+                    "sudo mkdir -p $TARGET; "
+                    "sudo rm -rf $TMP; "
+                    "sudo mkdir -p $TMP; "
+                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
+                    "if [ -f $TMP/init_node.sh ]; then "
+                    "  SRC=$TMP; "
+                    "elif [ -f $TMP/wrapper/init_node.sh ]; then "
+                    "  SRC=$TMP/wrapper; "
+                    "else "
+                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f -name init_node.sh | head -n1); "
+                    "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
+                    "fi; "
+                    "sudo rm -rf $TARGET/*; "
+                    "sudo cp -a $SRC/. $TARGET/; "
+                    "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
+                    "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
+                    "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
+                    "sudo chmod -R 755 $TARGET'"
                 )
-                cmd(f"minikube ssh -- 'sudo chmod +x {wrapper_target}/init_node.sh {wrapper_target}/restart_node_server.sh {wrapper_target}/update_app.sh 2>/dev/null || true; sudo chmod -R 755 {wrapper_target}'")
+                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
+                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
             else:
                 print(
                     "  Warning: orthanc-wrapper payload not found. "
@@ -3937,7 +4023,7 @@ def install_orthanc(CONFIG):
 
             wrapper_payload_available = (
                 cmd(
-                    f"minikube ssh -- 'test -f {wrapper_target}/init_node.sh'",
+                    "minikube ssh -- 'test -f /var/hostpath-provisioner/orthanc/orthanc-wrapper/init_node.sh'",
                     exit_on_error=False,
                 ) == 0
             )
