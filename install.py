@@ -420,6 +420,21 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     keycloak_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak")
     os.chdir(keycloak_path)
 
+    # Determine target paths for Keycloak data (NFS in K8s mode, host_path otherwise)
+    if USE_MINIKUBE:
+        _kc_base = "/var/hostpath-provisioner/keycloak"
+    else:
+        nfs_server = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
+        nfs_share = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip()
+        if nfs_server and nfs_share:
+            _kc_base = os.path.join(nfs_share, "keycloak")
+            print(f" Using NFS base: {nfs_server}:{_kc_base}")
+        else:
+            _kc_base = os.path.join(CONFIG.host_path, "keycloak")
+    _standalone_deployments_dir = os.path.join(_kc_base, "standalone-deployments")
+    _themes_data_dir = os.path.join(_kc_base, "themes-data")
+    _kc_postgres_data = os.path.join(_kc_base, "postgres-data")
+
 ## Force cleanup of stuck PVs first
     force_cleanup_pvs()
 
@@ -453,8 +468,8 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         cmd("minikube ssh -- 'sudo rm -rf /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
     else:
         hp = CONFIG.host_path
-        cmd(f"sudo mkdir -p {hp}/keycloak/postgres-data {hp}/keycloak/themes-data {hp}/keycloak/standalone-deployments")
-        cmd(f"sudo chmod -R 777 {hp}/keycloak")
+        cmd(f"sudo mkdir -p {hp}/keycloak/postgres-data {_kc_postgres_data} {_themes_data_dir} {_standalone_deployments_dir}")
+        cmd(f"sudo chmod -R 777 {hp}/keycloak {_kc_base}")
 
     cmd("sleep 10")
 
@@ -574,6 +589,15 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         pv_docs  = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolume"]
         pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
 
+        # In K8s mode, detect NFS server from managed-nfs-storage StorageClass
+        nfs_server = None
+        nfs_base = "/pv"
+        if not USE_MINIKUBE:
+            nfs_info = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
+            if nfs_info:
+                nfs_server = nfs_info
+                print(f" Detected NFS server: {nfs_server}{nfs_base}")
+
         for d in pv_docs:
             # Strip server-managed fields that block re-apply after delete+recreate.
             meta = d.get('metadata') or {}
@@ -587,10 +611,20 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
             claim_ref.pop('resourceVersion', None)
             if _sc and 'spec' in d:
                 d['spec']['storageClassName'] = _sc
+            # In K8s mode, convert hostPath to NFS
+            if nfs_server and 'spec' in d:
+                hp = d['spec'].pop('hostPath', None)
+                if hp:
+                    d['spec']['nfs'] = {
+                        'server': nfs_server,
+                        'path': nfs_base + hp['path'].replace('/var/hostpath-provisioner', '')
+                    }
+                    d['spec']['storageClassName'] = ""
+                    print(f"  Converted PV {d['metadata']['name']} to NFS: {nfs_server}:{nfs_base + hp['path'].replace('/var/hostpath-provisioner', '')}")
 
         for d in pvc_docs:
             d.setdefault('spec', {})
-            d['spec']['storageClassName'] = _sc if _sc else ""
+            d['spec']['storageClassName'] = _sc if (USE_MINIKUBE and _sc) else ""
             d.setdefault('metadata', {})
             d['metadata']['namespace'] = 'keycloak'
 
@@ -678,16 +712,15 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         cmd("minikube cp /tmp/themes.tar.gz minikube:/tmp/")
         cmd("minikube ssh -- 'sudo tar -xzf /tmp/themes.tar.gz -C /var/hostpath-provisioner/keycloak/themes-data/ --strip-components=1'")
     else:
-        kc_dest = os.path.join(CONFIG.host_path, "keycloak", "themes-data")
-        cmd(f"sudo mkdir -p {kc_dest}")
-        cmd(f"sudo tar -xzf /tmp/themes.tar.gz -C {kc_dest} --strip-components=1")
+        cmd(f"sudo mkdir -p {_themes_data_dir}")
+        cmd(f"sudo tar -xzf /tmp/themes.tar.gz -C {_themes_data_dir} --strip-components=1")
 
     # Only copy JARs if they were successfully downloaded and validated
     if os.path.exists(jar1_path) and os.path.getsize(jar1_path) > 0:
         if USE_MINIKUBE:
             cmd(f"minikube cp {jar1_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
         else:
-            cmd(f"sudo cp {jar1_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+            cmd(f"sudo cp {jar1_path} {_standalone_deployments_dir}/")
     else:
         print(f"  Warning: Skipping corrupted JAR: {jar1_path}")
 
@@ -695,7 +728,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         if USE_MINIKUBE:
             cmd(f"minikube cp {jar2_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
         else:
-            cmd(f"sudo cp {jar2_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+            cmd(f"sudo cp {jar2_path} {_standalone_deployments_dir}/")
     else:
         print(f"  Warning: Skipping corrupted JAR: {jar2_path}")
 
@@ -728,7 +761,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if USE_MINIKUBE:
         cmd(f"minikube cp {realm_config_file_private_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
     else:
-        cmd(f"sudo cp {realm_config_file_private_path} {CONFIG.host_path}/keycloak/standalone-deployments/")
+        cmd(f"sudo cp {realm_config_file_private_path} {_standalone_deployments_dir}/")
 
     cmd("minikube kubectl -- apply -f dep2_database.yaml -n keycloak")
 
