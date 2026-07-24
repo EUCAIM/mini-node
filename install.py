@@ -467,9 +467,8 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if USE_MINIKUBE:
         cmd("minikube ssh -- 'sudo rm -rf /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
     else:
-        hp = CONFIG.host_path
-        cmd(f"sudo mkdir -p {hp}/keycloak/postgres-data {_kc_postgres_data} {_themes_data_dir} {_standalone_deployments_dir}")
-        cmd(f"sudo chmod -R 777 {hp}/keycloak {_kc_base}")
+        cmd(f"sudo mkdir -p {_kc_postgres_data} {_themes_data_dir} {_standalone_deployments_dir}")
+        cmd(f"sudo chmod -R 777 {_kc_base}")
 
     cmd("sleep 10")
 
@@ -591,7 +590,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
         # In K8s mode, detect NFS server from managed-nfs-storage StorageClass
         nfs_server = None
-        nfs_base = "/pv"
+
         if not USE_MINIKUBE:
             nfs_info = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
             if nfs_info:
@@ -3657,6 +3656,25 @@ def package_workstation_charts(CONFIG):
                 # Re-apply permissions after extraction (tar inside minikube creates root-owned files
                 # on the host-mounted path, which would otherwise block helm repo index)
                 cmd(f"sudo chmod -R 777 {host_charts_dir}")
+
+                # Clone and package ETL toolset chart (NiFi et al.) into the same chart repository
+                etl_work_dir = os.path.join(SCRIPT_DIR, "etl-toolset-tmp")
+                etl_repo_dir = os.path.join(etl_work_dir, "etl-toolset")
+                if not os.path.isdir(etl_repo_dir):
+                    os.makedirs(etl_work_dir, exist_ok=True)
+                    print(f" Cloning ETL toolset repository (Reference_Node)...")
+                    _prev = os.getcwd()
+                    os.chdir(etl_work_dir)
+                    etl_clone = cmd("GIT_TERMINAL_PROMPT=0 git clone --depth 1 --branch Reference_Node https://github.com/EUCAIM/etl-toolset.git", exit_on_error=False)
+                    os.chdir(_prev)
+                    if etl_clone == 0:
+                        print(f" Packaging ETL chart...")
+                        cmd(f"sudo $(which helm) package {os.path.join(etl_repo_dir, 'chart')} -d {host_charts_dir}")
+                    else:
+                        print(f"  Warning: ETL toolset clone failed, skipping")
+                else:
+                    print(f" ETL toolset repo already exists, re-packaging chart...")
+                    cmd(f"sudo $(which helm) package {os.path.join(etl_repo_dir, 'chart')} -d {host_charts_dir}")
 
                 # Generate Helm repository index.yaml locally (helm not available inside minikube).
                 # Must run with sudo because the charts dir is root-owned from the VM-side tar extraction;
