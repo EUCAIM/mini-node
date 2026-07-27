@@ -455,12 +455,9 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     cmd("minikube kubectl -- delete pv pv-postgres-data-keycloak pv-themes-data pv-standalone-deployments --timeout=30s --force --grace-period=0 || true")
     cmd("sleep 5")
 
-    if USE_MINIKUBE:
-        cmd("minikube kubectl -- label nodes minikube chaimeleon.eu/target=core-services --overwrite")
-    else:
-        _first_node = cmd_output("kubectl get nodes -o jsonpath='{.items[0].metadata.name}' 2>/dev/null").strip()
-        if _first_node:
-            cmd(f"kubectl label nodes {_first_node} chaimeleon.eu/target=core-services --overwrite || true")
+    _nodes = cmd_output(f"{KUBECTL} get nodes -o jsonpath='{{.items[*].metadata.name}}' 2>/dev/null").strip().split()
+    for _n in _nodes:
+        cmd(f"{KUBECTL} label nodes {_n} chaimeleon.eu/target=core-services --overwrite || true")
     cmd("minikube kubectl -- create priorityclass core-services --value=1000 --description='Priority class for core services' || true")
     cmd("minikube kubectl -- create priorityclass core-applications --value=900 --description='Priority class for core applications' || true")
 
@@ -590,27 +587,27 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
         # In K8s mode, detect NFS server from managed-nfs-storage StorageClass
         nfs_server = None
+        nfs_base = "/pv"
 
         if not USE_MINIKUBE:
             nfs_info = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
             if nfs_info:
                 nfs_server = nfs_info
+                nfs_base = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip() or "/pv"
                 print(f" Detected NFS server: {nfs_server}{nfs_base}")
 
         for d in pv_docs:
-            # Strip server-managed fields that block re-apply after delete+recreate.
             meta = d.get('metadata') or {}
             for field in ('resourceVersion', 'uid', 'creationTimestamp',
                           'managedFields', 'selfLink', 'generation'):
                 meta.pop(field, None)
             d.pop('status', None)
-            # Clear claimRef.uid so the PV can rebind to the freshly created PVC.
             claim_ref = (d.get('spec') or {}).get('claimRef') or {}
             claim_ref.pop('uid', None)
             claim_ref.pop('resourceVersion', None)
             if _sc and 'spec' in d:
                 d['spec']['storageClassName'] = _sc
-            # In K8s mode, convert hostPath to NFS
+
             if nfs_server and 'spec' in d:
                 hp = d['spec'].pop('hostPath', None)
                 if hp:
