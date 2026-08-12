@@ -177,6 +177,66 @@ def _detect_storage_class():
     print(" Warning: no StorageClass detected; PVCs will rely on cluster defaults/static provisioning")
     return ""
 
+
+def _nfs_server_base():
+    """Detect NFS server and base path from managed-nfs-storage StorageClass.
+    Returns (server, base_path) or (None, None) in minikube mode or if not found."""
+    if USE_MINIKUBE:
+        return None, None
+    server = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
+    share = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip()
+    if server and share:
+        return server, share
+    if server:
+        return server, "/pv"
+    return None, None
+
+
+def _convert_hostpath_pvs_to_nfs(yaml_path: str, namespace: str = ""):
+    """Read a multi-doc YAML file, convert hostPath PVs to NFS,
+    delete existing PVs with the same names (immutable after creation),
+    create the target directories on the NFS export,
+    write a private copy, and return the path to apply.
+    Returns the original path if no PVs were found or not in K8s mode."""
+    if USE_MINIKUBE or not os.path.exists(yaml_path):
+        return yaml_path
+    nfs_server, nfs_base = _nfs_server_base()
+    if not nfs_server:
+        return yaml_path
+    try:
+        with open(yaml_path) as f:
+            docs = list(yaml.safe_load_all(f))
+    except Exception:
+        return yaml_path
+    changed = False
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        if d.get("kind") == "PersistentVolume":
+            spec = d.get("spec") or {}
+            hp = spec.pop("hostPath", None)
+            if not hp:
+                continue
+            _name = d.get("metadata", {}).get("name", "")
+            _nfs_path = nfs_base + hp["path"].replace("/var/hostpath-provisioner", "")
+            cmd(f"{KUBECTL} delete pv {_name} --ignore-not-found --timeout=10s --force --grace-period=0 2>/dev/null", exit_on_error=False)
+            cmd(f"sudo mkdir -p {_nfs_path}", exit_on_error=False)
+            cmd(f"sudo chmod -R 777 {_nfs_path}", exit_on_error=False)
+            spec["nfs"] = {"server": nfs_server, "path": _nfs_path}
+            spec["storageClassName"] = ""
+            print(f"  NFS-converted PV {_name} -> {nfs_server}:{_nfs_path}")
+            changed = True
+        elif d.get("kind") == "PersistentVolumeClaim":
+            d.setdefault("spec", {})["storageClassName"] = ""
+            changed = True
+    if not changed:
+        return yaml_path
+    private_path = yaml_path.replace(".yaml", ".private.yaml")
+    with open(private_path, "w") as f:
+        yaml.safe_dump_all(docs, f, sort_keys=False)
+    return private_path
+
+
 ## Function to execute shell commands
 def cmd(command, exit_on_error=True):
     command = _prepare_command(command)
@@ -388,7 +448,11 @@ def force_cleanup_pvs():
 ## Class to manage Keycloak client secrets find them if existing to avoid conflicts or generate new ones
 class Auth_client_secrets():
     def __init__(self):
-        private_realm_file = os.path.join(SCRIPT_DIR, "eucaim-node-realm.private.json")
+        private_realm_candidates = [
+            os.path.join(SCRIPT_DIR, "k8s-deploy-node", "keycloak", "eucaim-node-realm.private.json"),
+            os.path.join(SCRIPT_DIR, "eucaim-node-realm.private.json"),
+        ]
+        private_realm_file = next((p for p in private_realm_candidates if os.path.exists(p)), private_realm_candidates[0])
         existing_secrets = {}
 
         if os.path.exists(private_realm_file):
@@ -640,7 +704,8 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     # Apply init volumes for keycloak if present
     if os.path.exists("dep1_init_volumes.yaml"):
-        cmd("minikube kubectl -- apply -f dep1_init_volumes.yaml -n keycloak")
+        _init_pv = _convert_hostpath_pvs_to_nfs("dep1_init_volumes.yaml")
+        cmd(f"minikube kubectl -- apply -f {_init_pv} -n keycloak")
 
     jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
@@ -753,6 +818,11 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
                 l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
                 fout.write(l)
+
+    # Keep a copy in the repository root so next installer runs can reuse the same client secrets.
+    root_private_realm = os.path.join(SCRIPT_DIR, realm_config_file_private)
+    if realm_config_file_private_path != root_private_realm:
+        cmd(f"cp {shlex.quote(realm_config_file_private_path)} {shlex.quote(root_private_realm)}", exit_on_error=False)
 
     if USE_MINIKUBE:
         cmd(f"minikube cp {realm_config_file_private_path} minikube:/var/hostpath-provisioner/keycloak/standalone-deployments/")
@@ -1068,27 +1138,44 @@ def create_dataset_service_pvcs():
     # Ensure namespace exists
     cmd("minikube kubectl -- create namespace dataset-service || true")
 
-    # Ensure all required host directories exist on the minikube VM before applying PVCs.
-    # The hostpath provisioner requires the directories to already exist or the pod will
-    # fail with "no such file or directory" (CreateContainerConfigError).
-    print("  Creating required host directories on minikube VM...")
-    dirs = [
-        "/var/hostpath-provisioner/dataset-service/postgres-data",
-        "/var/hostpath-provisioner/dataset-service/dataset-service-data",
-        "/var/hostpath-provisioner/dataset-service/datalake",
-        "/var/hostpath-provisioner/dataset-service/datasets",
-    ]
-    for d in dirs:
-        cmd(f"minikube ssh -- 'sudo mkdir -p {d}'")
-    cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/'")
-    print("  Host directories created.")
+    # Ensure all required storage directories exist before applying PVCs.
+    # If they are missing, pods may fail with "no such file or directory"
+    # (CreateContainerConfigError).
+    if USE_MINIKUBE:
+        print("  Creating required host directories on minikube VM...")
+        dirs = [
+            "/var/hostpath-provisioner/dataset-service/postgres-data",
+            "/var/hostpath-provisioner/dataset-service/dataset-service-data",
+            "/var/hostpath-provisioner/dataset-service/datalake",
+            "/var/hostpath-provisioner/dataset-service/datasets",
+        ]
+        for d in dirs:
+            cmd(f"minikube ssh -- 'sudo mkdir -p {d}'")
+        cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/dataset-service/'")
+        print("  Host directories created.")
+    else:
+        print(f"  Creating required storage directories under {CONFIG.host_path}...")
+        dirs = [
+            os.path.join(CONFIG.host_path, "dataset-service", "postgres-data"),
+            os.path.join(CONFIG.host_path, "dataset-service", "dataset-service-data"),
+            os.path.join(CONFIG.host_path, "dataset-service", "datalake"),
+            os.path.join(CONFIG.host_path, "dataset-service", "datalake", "storage_link"),
+            os.path.join(CONFIG.host_path, "dataset-service", "datasets"),
+            os.path.join(CONFIG.host_path, "dataset-service", "dataset-service-data", "datalake"),
+            os.path.join(CONFIG.host_path, "dataset-service", "dataset-service-data", "datalake", "storage_link"),
+        ]
+        for d in dirs:
+            cmd(f"sudo mkdir -p {shlex.quote(d)}", exit_on_error=False)
+        cmd(f"sudo chmod -R 777 {shlex.quote(os.path.join(CONFIG.host_path, 'dataset-service'))}", exit_on_error=False)
+        print("  Storage directories prepared.")
 
     if not os.path.exists(pvcs_path):
         print(f" Warning: PV manifest not found: {pvcs_path}")
         return False
 
-    print(f" Applying PV/PVC manifest: {pvcs_path} to namespace dataset-service")
-    cmd(f"minikube kubectl -- apply -f {pvcs_path} -n dataset-service")
+    _pv_path = _convert_hostpath_pvs_to_nfs(pvcs_path)
+    print(f" Applying PV/PVC manifest: {_pv_path} to namespace dataset-service")
+    cmd(f"minikube kubectl -- apply -f {_pv_path} -n dataset-service")
     cmd("minikube kubectl -- get pvc -n dataset-service")
     return True
 
@@ -1424,16 +1511,24 @@ def install_dataset_explorer(CONFIG):
         print("\nBuilding dataset-explorer React application with Docker...")
         print(" This may take a few minutes...")
 
-        # Use Docker to build without installing npm locally
-        build_result = cmd(
-            'docker run --rm -v $(pwd):/home/node/app node:24.9-slim '
-            'bash -c "cd /home/node/app && npm install && npm run build-mini-node"',
-            exit_on_error=False
-        )
+        # Use a container runtime to build without installing npm locally.
+        # In K8s mode, Docker is often unavailable; use nerdctl (containerd CLI).
+        if USE_MINIKUBE:
+            build_result = cmd(
+                'docker run --rm -v $(pwd):/home/node/app node:24.9-slim '
+                'bash -c "cd /home/node/app && npm install && npm run build-mini-node"',
+                exit_on_error=False
+            )
+        else:
+            build_result = cmd(
+                'nerdctl run --rm -v $(pwd):/home/node/app node:24.9-slim '
+                'bash -c "cd /home/node/app && npm install && npm run build-mini-node"',
+                exit_on_error=False
+            )
 
         if build_result != 0:
             print("  Error: Build failed")
-            print("  Make sure Docker is installed and running")
+            print("  Make sure the selected container runtime is installed and running")
             return
 
         print(" Build completed successfully")
@@ -2164,7 +2259,8 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
 
         # Apply PVC for user homes
         print(f" Applying user-homes PVC...")
-        cmd("minikube kubectl -- apply -f pvcs-for-operator.yaml")
+        _operator_pv = _convert_hostpath_pvs_to_nfs("pvcs-for-operator.yaml")
+        cmd(f"minikube kubectl -- apply -f {_operator_pv}")
 
         # Use only the current dsws-operator folder and installation-values.yaml
         print(f" Using current dsws-operator directory and installation-values.yaml (no chart repo check)")
@@ -2604,11 +2700,35 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
         # --install: Install if not already installed
         # Note: --force is intentionally omitted; it conflicts with server-side apply in newer Helm versions.
         # Pod recreation is handled explicitly below instead.
-        helm_cmd = (
-            "helm upgrade --install kubeapps oci://registry-1.docker.io/bitnamicharts/kubeapps "
-            "--version 17.1.1 --namespace kubeapps -f {}".format(private_values_file)
-        )
+        # Use local chart if already pulled (avoids OCI issues on slow networks)
+        local_chart = os.path.join(os.getcwd(), "kubeapps-17.1.1.tgz")
+        if not os.path.exists(local_chart):
+            print(" Pulling chart from OCI registry (timeout: 120s)...")
+            print("  (This can take 1-2 minutes, please wait...)")
+            pull_ret = cmd(
+                "timeout 120 helm pull oci://registry-1.docker.io/bitnamicharts/kubeapps "
+                "--version 17.1.1",
+                exit_on_error=False,
+            )
+            if pull_ret != 0:
+                print("  Warning: chart pull failed, will try direct OCI install (with 300s timeout)")
+        if os.path.exists(local_chart):
+            print(f" Using local chart: {local_chart}")
+            helm_cmd = (
+                f"timeout 300 helm upgrade --install kubeapps {local_chart} "
+                f"--namespace kubeapps -f {private_values_file}"
+            )
+        else:
+            print(" Installing directly from OCI registry (timeout: 300s)...")
+            print("  (This can take 2-3 minutes, please wait...)")
+            helm_cmd = (
+                "timeout 300 helm upgrade --install kubeapps "
+                "oci://registry-1.docker.io/bitnamicharts/kubeapps "
+                "--version 17.1.1 --namespace kubeapps -f {}".format(private_values_file)
+            )
+        print(" Running: helm upgrade --install kubeapps ...")
         helm_ret = cmd(helm_cmd, exit_on_error=False)
+        print(f" Helm command completed with return code: {helm_ret}")
         if helm_ret != 0:
             print("  First Helm upgrade failed; retrying after AppRepository cleanup...")
             cmd(
@@ -4141,7 +4261,8 @@ def install_orthanc(CONFIG):
         # Apply PVs and PVCs
         if os.path.exists("orthanc-pvc.yaml"):
             print(" Applying Orthanc PVs and PVCs...")
-            cmd("minikube kubectl -- apply -f orthanc-pvc.yaml")
+            _orthanc_pv = _convert_hostpath_pvs_to_nfs("orthanc-pvc.yaml")
+            cmd(f"minikube kubectl -- apply -f {_orthanc_pv}")
 
         # Create orthanc-secrets from config (idempotent)
         import json as _json
@@ -4294,12 +4415,30 @@ def install_orthanc(CONFIG):
             cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
             cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
         else:
-            hp = CONFIG.host_path
-            print(" SKIP bindfs mounts (K8s mode)")
-            print("  >> ADMIN: Set up bindfs mounts manually on your cluster nodes if needed:")
+            hp = CONFIG.host_path.rstrip('/')
+            datalake_candidates = [
+                f"{hp}/dataset-service/datalake/storage_link",
+                f"{hp}/dataset-service/dataset-service-data/datalake/storage_link",
+                f"{hp}/dataset-service/datasets/storage_link",
+                f"{hp}/dataset-service/datasets",
+            ]
+            datalake_src = next((p for p in datalake_candidates if os.path.isdir(p)), datalake_candidates[0])
+            datasets_src = f"{hp}/dataset-service/datasets"
+
+            # Prepare local directories and canonical storage paths so bindfs commands are immediately usable.
+            cmd("sudo mkdir -p /mnt /mnt/datalake /mnt/datasets /var/lib/orthanc", exit_on_error=False)
+            for d in [
+                f"{hp}/orthanc/orthanc-storage",
+                f"{hp}/dataset-service/datalake/storage_link",
+                f"{hp}/dataset-service/datasets",
+            ]:
+                cmd(f"sudo mkdir -p {shlex.quote(d)}", exit_on_error=False)
+
+            print(" SKIP bindfs auto-mount (K8s mode)")
+            print("  >> ADMIN: run these on EACH cluster node and persist in /etc/fstab:")
             print(f"      bindfs {hp}/orthanc/orthanc-storage /var/lib/orthanc -o nouser,ro,resolve-symlinks,perms=o+rD")
-            print(f"      bindfs {hp}/dataset-service/datalake/storage_link /mnt/datalake -o nouser,ro,resolve-symlinks,perms=o+rD")
-            print(f"      bindfs {hp}/dataset-service/datasets /mnt/datasets -o nouser,ro,resolve-symlinks,perms=o+rD")
+            print(f"      bindfs {datalake_src} /mnt/datalake -o nouser,ro,resolve-symlinks,perms=o+rD")
+            print(f"      bindfs {datasets_src} /mnt/datasets -o nouser,ro,resolve-symlinks,perms=o+rD")
 
         print(f" Orthanc installation completed")
         print(f" Access Orthanc at: https://{CONFIG.public_domain}/orthanc (or configured subdomain)")
@@ -4370,6 +4509,112 @@ def install_clinical_data_sql_db():
         print(f"  Error during clinical-data-sql-db installation: {e}")
     finally:
         os.chdir(prev_dir)
+
+
+def uninstall_mini_node(config=None, purge_data=False):
+    '''Uninstall resources deployed by this installer without touching core cluster components.'''
+    print(f"\n{'='*80}")
+    print(" Uninstalling mini-node resources")
+    print(f"{'='*80}\n")
+
+    namespaces = [
+        "clinical-data-sql-db",
+        "dataset-service",
+        "dsws-operator",
+        "guacamole",
+        "keycloak",
+        "kubeapps",
+        "orthanc",
+        "federated-search",
+        "jobman-service",
+        "jobman-service-exec",
+        "eucaim-fed-computation",
+    ]
+
+    helm_releases = [
+        "kubeapps",
+        "guacamole",
+        "postgresql",
+        "dsws-operator",
+        "federated-search",
+        "focus",
+        "beam-proxy",
+    ]
+
+    known_pvs = [
+        "pv-datalake",
+        "pv-dataset-service-data",
+        "pv-datasets",
+        "pv-guacamole-postgresql",
+        "pv-postgres-data",
+        "pv-postgres-data-keycloak",
+        "pv-themes-data",
+        "pv-standalone-deployments",
+    ]
+
+    print(" Step 1/7: uninstalling known Helm releases...")
+    for ns in namespaces:
+        for rel in helm_releases:
+            cmd(f"helm -n {ns} uninstall {rel}", exit_on_error=False)
+
+    print(" Step 2/7: deleting namespaced resources...")
+    for ns in namespaces:
+        cmd(
+            f"{KUBECTL} -n {ns} delete "
+            "deploy,sts,ds,job,cronjob,svc,ing,cm,secret,sa,role,rolebinding,pvc "
+            "--all --ignore-not-found=true",
+            exit_on_error=False,
+        )
+
+    print(" Step 3/7: deleting target namespaces...")
+    for ns in namespaces:
+        cmd(f"{KUBECTL} delete ns {ns} --ignore-not-found=true", exit_on_error=False)
+
+    print(" Step 4/7: deleting known persistent volumes...")
+    cmd(f"{KUBECTL} delete pv {' '.join(known_pvs)} --ignore-not-found=true", exit_on_error=False)
+
+    print(" Step 5/7: deleting remaining PVs bound to mini-node namespaces...")
+    pv_claims = cmd_output(
+        f"{KUBECTL} get pv "
+        "-o jsonpath='{range .items[*]}{.metadata.name}{\"|\"}{.spec.claimRef.namespace}{\"\\n\"}{end}' 2>/dev/null"
+    )
+    if pv_claims:
+        for row in pv_claims.splitlines():
+            if not row or "|" not in row:
+                continue
+            pv_name, claim_ns = row.split("|", 1)
+            if claim_ns in namespaces and pv_name:
+                cmd(f"{KUBECTL} delete pv {pv_name} --ignore-not-found=true", exit_on_error=False)
+
+    print(" Step 6/7: deleting cluster-scoped resources created by installer...")
+    cmd(f"{KUBECTL} delete clusterrolebinding user-management-sa-binding --ignore-not-found=true", exit_on_error=False)
+    cmd(f"{KUBECTL} delete priorityclass core-services core-applications --ignore-not-found=true", exit_on_error=False)
+
+    print(" Step 7/7: forcing namespace finalizer cleanup when needed...")
+    for ns in namespaces:
+        cmd(
+            f"{KUBECTL} patch ns {ns} -p '{{\"metadata\":{{\"finalizers\":[]}}}}' --type=merge",
+            exit_on_error=False,
+        )
+
+    if purge_data:
+        if config is None or not getattr(config, 'host_path', None):
+            print("  Warning: --purge-data requested but host_path is not available in config")
+        else:
+            hp = config.host_path.rstrip('/')
+            print(" Optional purge: deleting mini-node data directories under host_path...")
+            purge_dirs = [
+                f"{hp}/keycloak",
+                f"{hp}/dataset-service",
+                f"{hp}/orthanc",
+                f"{hp}/guacamole",
+                f"{hp}/clinical-data-sql-db",
+                f"{hp}/data/homes",
+            ]
+            for d in purge_dirs:
+                cmd(f"sudo rm -rf {shlex.quote(d)}", exit_on_error=False)
+
+    print("\n Uninstall finished. Core namespaces/services were not touched.")
 
 
 FLAVORS = ["micro", "mini", "standard"]
@@ -4575,6 +4820,10 @@ if __name__ == '__main__':
     parser.add_argument("FLAVOR", help="Which flavor to install (micro, mini, standard)", nargs="?", default="")
     parser.add_argument("--k8s", action="store_true",
                         help="Deploy to a real Kubernetes cluster using 'kubectl' instead of 'minikube kubectl --'")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Remove resources installed by this script (keeps core cluster components)")
+    parser.add_argument("--purge-data", action="store_true",
+                        help="With --uninstall, also remove mini-node data under host_path")
     args = parser.parse_args()
 
     if args.k8s:
@@ -4582,6 +4831,14 @@ if __name__ == '__main__':
         USE_MINIKUBE = False
         print("K8s mode enabled: using 'kubectl' instead of 'minikube kubectl --'")
         print("Note: minikube-specific operations (ssh, cp, addons) will be skipped.")
+
+    CONFIG = load_config(logging.root, DEFAULT_CONFIG_FILE_PATH)
+    if CONFIG is None and not args.uninstall:
+        exit(1)
+
+    if args.uninstall:
+        uninstall_mini_node(config=CONFIG, purge_data=args.purge_data)
+        exit(0)
 
     flavor = str(args.FLAVOR).lower()
     while flavor not in FLAVORS:
@@ -4594,9 +4851,6 @@ if __name__ == '__main__':
             flavor = FLAVORS[int(input(""))]
         except (ValueError, IndexError): flavor = ""
     print(flavor)
-
-    CONFIG = load_config(logging.root, DEFAULT_CONFIG_FILE_PATH)
-    if CONFIG is None: exit(1)
 
     install(flavor)
 
