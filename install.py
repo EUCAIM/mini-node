@@ -2629,9 +2629,10 @@ def install_kubeapps(CONFIG, client_kubernetes_secret: str):
             data['global']['security']['allowInsecureImages'] = True
             print(f" Enabled allowInsecureImages for Harbor registry")
 
-        # Configure PostgreSQL storageClass dynamically
+        # Configure PostgreSQL storageClass dynamically for real K8s installs.
+        # Minikube keeps its own default storage path.
         _sc = _detect_storage_class()
-        if CONFIG.flavor == 'micro':
+        if not USE_MINIKUBE:
             if 'postgresql' not in data:
                 data['postgresql'] = {}
             if 'primary' not in data['postgresql']:
