@@ -434,7 +434,7 @@ def force_cleanup_pvs():
     '''Force cleanup of stuck PVs by removing finalizers'''
     print("Force cleaning up stuck PVs...")
 
-    ret = cmd("minikube kubectl -- get pv --no-headers | grep Terminating", exit_on_error=False)
+    ret = cmd(f"{KUBECTL} get pv --no-headers | grep Terminating", exit_on_error=False)
     if ret == 0:
         pv_names = [
             "pv-datalake", "pv-dataset-service-data", "pv-datasets",
@@ -442,8 +442,116 @@ def force_cleanup_pvs():
             "pv-postgres-data-keycloak", "pv-themes-data", "pv-standalone-deployments"
         ]
         for pv in pv_names:
-            cmd(f"minikube kubectl -- patch pv {pv} -p '{{\"metadata\":{{\"finalizers\":null}}}}' --type=merge || true")
+            cmd(f"{KUBECTL} patch pv {pv} -p '{{\"metadata\":{{\"finalizers\":null}}}}' --type=merge || true")
         cmd("sleep 5")
+
+
+def cleanup_stale_dsws_webhooks():
+    """Best-effort cleanup for dead DSWS admission webhooks that can block namespace deletion."""
+    cmd(
+        f"{KUBECTL} get mutatingwebhookconfiguration -o name 2>/dev/null | grep dsws | xargs -r {KUBECTL} delete",
+        exit_on_error=False,
+    )
+    cmd(
+        f"{KUBECTL} get validatingwebhookconfiguration -o name 2>/dev/null | grep dsws | xargs -r {KUBECTL} delete",
+        exit_on_error=False,
+    )
+
+
+def ensure_namespace_active(namespace: str, timeout_seconds: int = 180) -> bool:
+    """Ensure a namespace is Active, force-clearing finalizers when stuck Terminating."""
+    phase = cmd_output(f"{KUBECTL} get namespace {namespace} -o jsonpath='{{.status.phase}}' 2>/dev/null").strip().strip("'\"")
+
+    if phase == "Terminating":
+        print(f" Namespace '{namespace}' is Terminating; forcing finalizer cleanup...")
+        cmd(
+            f"{KUBECTL} patch namespace {namespace} -p '{{\"spec\":{{\"finalizers\":[]}}}}' --type=merge",
+            exit_on_error=False,
+        )
+        # Do not block on namespace deletion; finalizers/webhooks can delay completion.
+        cmd(f"{KUBECTL} delete namespace {namespace} --ignore-not-found=true --wait=false", exit_on_error=False)
+
+    waited = 0
+    last_patch_at = -999
+    last_webhook_cleanup_at = -999
+    while waited < timeout_seconds:
+        phase = cmd_output(f"{KUBECTL} get namespace {namespace} -o jsonpath='{{.status.phase}}' 2>/dev/null").strip().strip("'\"")
+        if phase == "Active":
+            return True
+        if not phase:
+            cmd(f"{KUBECTL} create namespace {namespace}", exit_on_error=False)
+        elif phase == "Terminating":
+            if waited - last_patch_at >= 15:
+                print(f" Namespace '{namespace}' still Terminating after {waited}s; retrying finalizer cleanup...")
+                cmd(
+                    f"{KUBECTL} patch namespace {namespace} -p '{{\"spec\":{{\"finalizers\":[]}}}}' --type=merge",
+                    exit_on_error=False,
+                )
+                cmd(f"{KUBECTL} delete namespace {namespace} --ignore-not-found=true --wait=false", exit_on_error=False)
+                last_patch_at = waited
+            if waited - last_webhook_cleanup_at >= 30:
+                print(" Checking and removing stale DSWS webhooks that may block namespace deletion...")
+                cleanup_stale_dsws_webhooks()
+                last_webhook_cleanup_at = waited
+        if waited > 0 and waited % 30 == 0:
+            print(f" Waiting for namespace '{namespace}' to become Active... ({waited}/{timeout_seconds}s)")
+        time.sleep(3)
+        waited += 3
+
+    final_phase = cmd_output(f"{KUBECTL} get namespace {namespace} -o jsonpath='{{.status.phase}}' 2>/dev/null").strip().strip("'\"")
+    print(f"  Warning: namespace '{namespace}' did not become Active (current phase: {final_phase or 'missing'})")
+    if final_phase == "Terminating":
+        print("  Namespace deletion is likely blocked by cluster-level resources/finalizers.")
+        print("  Diagnostic commands:")
+        print(f"   {KUBECTL} describe namespace {namespace}")
+        print(f"   {KUBECTL} get mutatingwebhookconfiguration -o name | grep dsws")
+        print(f"   {KUBECTL} get validatingwebhookconfiguration -o name | grep dsws")
+        print(f"   {KUBECTL} get apiservice | grep -i False")
+    return final_phase == "Active"
+
+
+def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bool:
+    """Rewrite orthanc-wrapper app.json host references """
+    if not wrapper_dir or not os.path.isdir(wrapper_dir):
+        return False
+
+    old_root_url = "https://node-demo.imaging.i3m.upv.es/wrapper"
+    new_root_url = f"https://{public_domain}/wrapper"
+    old_domain_url = "https://node-demo.imaging.i3m.upv.es"
+    new_domain_url = f"https://{public_domain}"
+
+    changed = False
+    for root, _dirs, files in os.walk(wrapper_dir):
+        if "app.json" not in files:
+            continue
+
+        app_json_path = os.path.join(root, "app.json")
+        try:
+            with open(app_json_path, "r", encoding="utf-8") as f:
+                content = f.read()
+        except Exception as exc:
+            print(f"  Warning: could not read {app_json_path}: {exc}")
+            continue
+
+        updated = content
+        updated = updated.replace(old_root_url, new_root_url)
+        updated = updated.replace(old_domain_url, new_domain_url)
+        updated = updated.replace("node-demo.imaging.i3m.upv.es", public_domain)
+        updated = updated.replace("node-demo", public_domain)
+
+        if updated != content:
+            try:
+                with open(app_json_path, "w", encoding="utf-8") as f:
+                    f.write(updated)
+                print(f"  Updated orthanc-wrapper app.json host to: {public_domain}")
+                changed = True
+            except Exception as exc:
+                print(f"  Warning: could not update {app_json_path}: {exc}")
+        break
+
+    if not changed:
+        print("  orthanc-wrapper app.json already matched the configured domain or was not found")
+    return changed
 
 ## Class to manage Keycloak client secrets find them if existing to avoid conflicts or generate new ones
 class Auth_client_secrets():
@@ -502,28 +610,34 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 ## Force cleanup of stuck PVs first
     force_cleanup_pvs()
 
+    if not ensure_namespace_active("keycloak", timeout_seconds=180):
+        raise RuntimeError(
+            "Namespace 'keycloak' is not Active. "
+            "Run uninstall and clear stuck webhooks/namespaces before retrying install."
+        )
+
     print("Cleaning up existing Keycloak resources (preserving ingress, certificates, and secrets)...")
-    cmd("minikube kubectl -- create namespace keycloak || true")
-    cmd("minikube kubectl -- delete deployment --all -n keycloak --timeout=30s || true")
-    cmd("minikube kubectl -- delete statefulset --all -n keycloak --timeout=30s || true")
-    cmd("minikube kubectl -- delete service db -n keycloak --timeout=30s || true")
-    cmd("minikube kubectl -- delete service keycloak -n keycloak --timeout=30s || true")
-    cmd("minikube kubectl -- delete pvc --all -n keycloak --timeout=30s || true")
-    cmd("minikube kubectl -- delete job --all -n keycloak --timeout=30s || true")
-    cmd("minikube kubectl -- delete pod --all -n keycloak --timeout=30s --force --grace-period=0 || true")
+    cmd(f"{KUBECTL} create namespace keycloak || true")
+    cmd(f"{KUBECTL} delete deployment --all -n keycloak --timeout=30s || true")
+    cmd(f"{KUBECTL} delete statefulset --all -n keycloak --timeout=30s || true")
+    cmd(f"{KUBECTL} delete service db -n keycloak --timeout=30s || true")
+    cmd(f"{KUBECTL} delete service keycloak -n keycloak --timeout=30s || true")
+    cmd(f"{KUBECTL} delete pvc --all -n keycloak --timeout=30s || true")
+    cmd(f"{KUBECTL} delete job --all -n keycloak --timeout=30s || true")
+    cmd(f"{KUBECTL} delete pod --all -n keycloak --timeout=30s --force --grace-period=0 || true")
 
     print("Waiting for cleanup to complete...")
     cmd("sleep 10")
 
     print("Cleaning Keycloak PVs...")
-    cmd("minikube kubectl -- delete pv pv-postgres-data-keycloak pv-themes-data pv-standalone-deployments --timeout=30s --force --grace-period=0 || true")
+    cmd(f"{KUBECTL} delete pv pv-postgres-data-keycloak pv-themes-data pv-standalone-deployments --timeout=30s --force --grace-period=0 || true")
     cmd("sleep 5")
 
     _nodes = cmd_output(f"{KUBECTL} get nodes -o jsonpath='{{.items[*].metadata.name}}' 2>/dev/null").strip().split()
     for _n in _nodes:
         cmd(f"{KUBECTL} label nodes {_n} chaimeleon.eu/target=core-services --overwrite || true")
-    cmd("minikube kubectl -- create priorityclass core-services --value=1000 --description='Priority class for core services' || true")
-    cmd("minikube kubectl -- create priorityclass core-applications --value=900 --description='Priority class for core applications' || true")
+    cmd(f"{KUBECTL} create priorityclass core-services --value=1000 --description='Priority class for core services' || true")
+    cmd(f"{KUBECTL} create priorityclass core-applications --value=900 --description='Priority class for core applications' || true")
 
     if USE_MINIKUBE:
         cmd("minikube ssh -- 'sudo rm -rf /var/hostpath-provisioner 2>/dev/null; sudo mkdir -p /var/hostpath-provisioner && sudo rm -rf /var/hostpath-provisioner/keycloak && sudo mkdir -p /var/hostpath-provisioner/keycloak/postgres-data /var/hostpath-provisioner/keycloak/themes-data /var/hostpath-provisioner/keycloak/standalone-deployments && sudo chmod -R 777 /var/hostpath-provisioner/keycloak'")
@@ -620,6 +734,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     # Ensure namespace exists before applying resources
     cmd(f"{KUBECTL} create namespace keycloak --dry-run=client -o yaml | {KUBECTL} apply -f -")
+    ensure_namespace_active("keycloak", timeout_seconds=120)
     print("Verifying namespace is ready...")
     cmd(f"{KUBECTL} get namespace keycloak")
 
@@ -699,13 +814,13 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
             print(f"  Warning: could not write private file {private_dep0}: {e}")
 
         # Apply the private file
-        cmd("minikube kubectl -- create namespace keycloak || true")
-        cmd(f"minikube kubectl -- apply -f {private_dep0}")
+        cmd(f"{KUBECTL} create namespace keycloak || true")
+        cmd(f"{KUBECTL} apply -f {private_dep0}")
 
     # Apply init volumes for keycloak if present
     if os.path.exists("dep1_init_volumes.yaml"):
         _init_pv = _convert_hostpath_pvs_to_nfs("dep1_init_volumes.yaml")
-        cmd(f"minikube kubectl -- apply -f {_init_pv} -n keycloak")
+        cmd(f"{KUBECTL} apply -f {_init_pv} -n keycloak")
 
     jar1_url = "https://github.com/chaimeleon-eu/keycloak-event-listener-email-to-admin/releases/download/v1.0.6/keycloak-event-listener-email-to-admin-1.0.6.jar"
     jar2_url = "https://github.com/chaimeleon-eu/keycloak-required-action-user-validated/releases/download/v1.0.5/keycloak-required-action-user-validated-1.0.5.jar"
@@ -829,7 +944,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     else:
         cmd(f"sudo cp {realm_config_file_private_path} {_standalone_deployments_dir}/")
 
-    cmd("minikube kubectl -- apply -f dep2_database.yaml -n keycloak")
+    cmd(f"{KUBECTL} apply -f dep2_database.yaml -n keycloak")
 
     # Wait for the db pod to become Ready with a long timeout and clear diagnostics.
     # 'kubectl wait' alone with exit_on_error=True would abort the whole install on timeout.
@@ -865,7 +980,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
     cmd("sleep 30")
 
-    cmd(f"minikube kubectl -- apply -f {keycloak_deploy_file} -n keycloak")
+    cmd(f"{KUBECTL} apply -f {keycloak_deploy_file} -n keycloak")
 
     # Check if we should use Gateway API or traditional Ingress
     use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
@@ -880,7 +995,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         print(f"\n Configuring HTTPRoute for Keycloak (Gateway API)...")
 
         # Verify Gateway API CRDs are installed
-        crd_check = cmd("minikube kubectl -- get crd httproutes.gateway.networking.k8s.io 2>/dev/null", exit_on_error=False)
+        crd_check = cmd(f"{KUBECTL} get crd httproutes.gateway.networking.k8s.io 2>/dev/null", exit_on_error=False)
         if crd_check != 0:
             print("  WARNING: Gateway API CRDs not installed yet")
 
@@ -888,7 +1003,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
             httproute_file = "dep4_httproute.yaml"
             update_ingress_host(httproute_file, CONFIG.public_domain)
 
-            cmd(f"minikube kubectl -- apply -f {httproute_file}")
+            cmd(f"{KUBECTL} apply -f {httproute_file}")
             print(f" HTTPRoute applied for Keycloak at https://{CONFIG.public_domain}/auth")
 
     else:
@@ -901,7 +1016,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         update_ingress_host(ingress_file, CONFIG.public_domain)
 
         print(f" Applying/updating Keycloak ingress with domain: {CONFIG.public_domain}")
-        cmd(f"minikube kubectl -- apply -f {ingress_file} -n keycloak")
+        cmd(f"{KUBECTL} apply -f {ingress_file} -n keycloak")
 
         if use_tls:
             print("TLS certificate will be automatically provisioned by cert-manager")
@@ -4151,6 +4266,7 @@ def install_orthanc(CONFIG):
         wrapper_repo_tar = os.path.join(orthanc_dir, "wrapper", "orthanc-wrapper.tar.gz")
         if not os.path.isfile(wrapper_repo_tar):
             wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
+        wrapper_host_dir = os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
 
         wrapper_payload_available = False
 
@@ -4240,12 +4356,48 @@ def install_orthanc(CONFIG):
                         "  Warning: @meteorjs/reify runtime not found after bootstrap; "
                         "orthanc-wrapper may still fail with missing module errors"
                     )
+                rewrite_orthanc_wrapper_app_json("/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain)
         elif os.path.isfile(wrapper_repo_tar):
-            print(" Orthanc wrapper deployment (SKIP - K8s mode)")
-            print("  >> ADMIN: Manually deploy orthanc-wrapper from:")
-            print(f"       {wrapper_repo_tar}")
-            print(f"       Extract to {CONFIG.host_path}/orthanc/orthanc-wrapper/")
-            print(f"       Then install npm dependencies in bundle/programs/server")
+            print(" Installing orthanc-wrapper payload (K8s mode)...")
+            cmd(
+                "sudo bash -lc '"
+                f"set -e; TARGET={shlex.quote(wrapper_host_dir)}; TMP=/tmp/orthanc-wrapper-seed-unpack; TAR={shlex.quote(wrapper_repo_tar)}; "
+                "mkdir -p \"$TARGET\"; rm -rf \"$TMP\"; mkdir -p \"$TMP\"; "
+                "tar -xzf \"$TAR\" -C \"$TMP\"; "
+                "if [ -f \"$TMP/init_node.sh\" ]; then "
+                "  SRC=$TMP; "
+                "elif [ -f \"$TMP/wrapper/init_node.sh\" ]; then "
+                "  SRC=$TMP/wrapper; "
+                "else "
+                "  FOUND=$(find \"$TMP\" -maxdepth 4 -type f -name init_node.sh | head -n1); "
+                "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
+                "fi; "
+                "rm -rf \"$TARGET\"/*; cp -a \"$SRC\"/. \"$TARGET\"/; "
+                "chmod +x \"$TARGET\"/init_node.sh 2>/dev/null || true; "
+                "chmod +x \"$TARGET\"/restart_node_server.sh 2>/dev/null || true; "
+                "chmod +x \"$TARGET\"/update_app.sh 2>/dev/null || true; "
+                "chmod -R 755 \"$TARGET\"'",
+                exit_on_error=False,
+            )
+            wrapper_payload_available = (
+                cmd(f"sudo test -f {shlex.quote(os.path.join(wrapper_host_dir, 'init_node.sh'))}", exit_on_error=False) == 0
+            )
+            if not wrapper_payload_available:
+                print(
+                    "  Warning: orthanc-wrapper payload did not provide init_node.sh; "
+                    "orthanc-wrapper deployment will be skipped"
+                )
+
+            # Keep the wrapper configuration aligned with the current public domain.
+            rewrite_orthanc_wrapper_app_json(wrapper_host_dir, CONFIG.public_domain)
+
+        if not USE_MINIKUBE and not wrapper_payload_available:
+            # Allow pre-seeded wrapper content in host_path even if tar is missing.
+            wrapper_payload_available = (
+                cmd(f"sudo test -f {shlex.quote(os.path.join(wrapper_host_dir, 'init_node.sh'))}", exit_on_error=False) == 0
+            )
+            if wrapper_payload_available:
+                print(f" Reusing existing orthanc-wrapper payload from {wrapper_host_dir}")
 
         # Copy Lua script from repo into the host-path for Orthanc
         script_source = os.path.join(orthanc_dir, "scripts", "script.lua")
@@ -4567,9 +4719,20 @@ def uninstall_mini_node(config=None, purge_data=False):
             exit_on_error=False,
         )
 
+    # Kubeapps AppRepository CRs can keep namespace termination blocked via apprepo-cleanup-finalizer.
+    cmd(
+        f"{KUBECTL} -n kubeapps get apprepositories.kubeapps.com -o name 2>/dev/null "
+        f"| xargs -r -I{{}} {KUBECTL} -n kubeapps patch {{}} -p '{{\"metadata\":{{\"finalizers\":[]}}}}' --type=merge",
+        exit_on_error=False,
+    )
+    cmd(
+        f"{KUBECTL} -n kubeapps delete apprepositories.kubeapps.com --all --ignore-not-found=true",
+        exit_on_error=False,
+    )
+
     print(" Step 3/7: deleting target namespaces...")
     for ns in namespaces:
-        cmd(f"{KUBECTL} delete ns {ns} --ignore-not-found=true", exit_on_error=False)
+        cmd(f"{KUBECTL} delete ns {ns} --ignore-not-found=true --wait=false", exit_on_error=False)
 
     print(" Step 4/7: deleting known persistent volumes...")
     cmd(f"{KUBECTL} delete pv {' '.join(known_pvs)} --ignore-not-found=true", exit_on_error=False)
@@ -4587,14 +4750,37 @@ def uninstall_mini_node(config=None, purge_data=False):
             if claim_ns in namespaces and pv_name:
                 cmd(f"{KUBECTL} delete pv {pv_name} --ignore-not-found=true", exit_on_error=False)
 
-    print(" Step 6/7: deleting cluster-scoped resources created by installer...")
+    print(" Step 6/8: deleting cluster-scoped resources created by installer...")
     cmd(f"{KUBECTL} delete clusterrolebinding user-management-sa-binding --ignore-not-found=true", exit_on_error=False)
     cmd(f"{KUBECTL} delete priorityclass core-services core-applications --ignore-not-found=true", exit_on_error=False)
+    cmd(
+        f"{KUBECTL} get mutatingwebhookconfiguration -o name 2>/dev/null | grep dsws | xargs -r {KUBECTL} delete",
+        exit_on_error=False,
+    )
+    cmd(
+        f"{KUBECTL} get validatingwebhookconfiguration -o name 2>/dev/null | grep dsws | xargs -r {KUBECTL} delete",
+        exit_on_error=False,
+    )
 
-    print(" Step 7/7: forcing namespace finalizer cleanup when needed...")
+    print(" Step 7/8: forcing PV finalizer cleanup when needed...")
+    terminating_pvs = cmd_output(
+        f"{KUBECTL} get pv "
+        "-o jsonpath='{range .items[?(@.metadata.deletionTimestamp)]}{.metadata.name}{\"\\n\"}{end}' 2>/dev/null"
+    )
+    if terminating_pvs:
+        for pv_name in terminating_pvs.splitlines():
+            pv_name = pv_name.strip()
+            if not pv_name:
+                continue
+            cmd(
+                f"{KUBECTL} patch pv {pv_name} -p '{{\"metadata\":{{\"finalizers\":[]}}}}' --type=merge",
+                exit_on_error=False,
+            )
+
+    print(" Step 8/8: forcing namespace finalizer cleanup when needed...")
     for ns in namespaces:
         cmd(
-            f"{KUBECTL} patch ns {ns} -p '{{\"metadata\":{{\"finalizers\":[]}}}}' --type=merge",
+            f"{KUBECTL} patch ns {ns} -p '{{\"spec\":{{\"finalizers\":[]}}}}' --type=merge",
             exit_on_error=False,
         )
 
