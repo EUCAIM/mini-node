@@ -5,6 +5,7 @@ import enum
 import os
 import logging
 import shlex
+import shutil
 import string
 import random
 import re
@@ -508,6 +509,41 @@ def ensure_namespace_active(namespace: str, timeout_seconds: int = 180) -> bool:
         print(f"   {KUBECTL} get validatingwebhookconfiguration -o name | grep dsws")
         print(f"   {KUBECTL} get apiservice | grep -i False")
     return final_phase == "Active"
+
+
+def ensure_orthanc_wrapper_runtime(wrapper_dir: str) -> bool:
+    """Install the Meteor server dependencies required by the extracted orthanc-wrapper bundle."""
+    if not wrapper_dir or not os.path.isdir(wrapper_dir):
+        return False
+
+    server_dir = os.path.join(wrapper_dir, "bundle", "programs", "server")
+    package_json = os.path.join(server_dir, "package.json")
+    reify_runtime = os.path.join(server_dir, "node_modules", "@meteorjs", "reify", "lib", "runtime.js")
+
+    if not os.path.isfile(package_json):
+        return False
+    if os.path.isfile(reify_runtime):
+        return True
+
+    if subprocess.run(["bash", "-lc", "command -v npm >/dev/null 2>&1"], capture_output=True).returncode != 0:
+        print(f"  Warning: npm is not installed; orthanc-wrapper runtime dependencies cannot be bootstrapped in {wrapper_dir}")
+        return False
+
+    print(f"  Installing orthanc-wrapper runtime dependencies in {server_dir}...")
+    for install_cmd in [
+        ["npm", "install", "--omit=dev", "--no-audit", "--no-fund"],
+        ["npm", "install", "--no-save", "--no-audit", "--no-fund", "@meteorjs/reify"],
+    ]:
+        result = subprocess.run(install_cmd, cwd=server_dir, capture_output=True, text=True)
+        if result.returncode != 0:
+            print(f"  Warning: orthanc-wrapper dependency install failed for {' '.join(install_cmd)}")
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
+            return False
+
+    return os.path.isfile(reify_runtime)
 
 
 def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bool:
@@ -4266,7 +4302,22 @@ def install_orthanc(CONFIG):
         wrapper_repo_tar = os.path.join(orthanc_dir, "wrapper", "orthanc-wrapper.tar.gz")
         if not os.path.isfile(wrapper_repo_tar):
             wrapper_repo_tar = os.path.join(orthanc_dir, "orthanc-wrapper.tar.gz")
-        wrapper_host_dir = os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
+        wrapper_source_dir = os.path.join(orthanc_dir, "wrapper")
+        if not os.path.isdir(wrapper_source_dir):
+            wrapper_source_dir = os.path.join(orthanc_dir, "orthanc-wrapper")
+        if USE_MINIKUBE:
+            wrapper_host_dir = "/var/hostpath-provisioner/orthanc/orthanc-wrapper"
+            legacy_wrapper_host_dir = "/var/hostpath-provisioner/orthanc/wrapper"
+        else:
+            _nfs_server, _nfs_base = _nfs_server_base()
+            if _nfs_base:
+                wrapper_host_dir = os.path.join(_nfs_base, "orthanc", "orthanc-wrapper")
+            else:
+                wrapper_host_dir = os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
+            legacy_wrapper_host_dir = os.path.join(os.path.dirname(wrapper_host_dir), "wrapper")
+
+        if os.path.isdir(legacy_wrapper_host_dir) and not os.path.isdir(wrapper_host_dir):
+            wrapper_host_dir = legacy_wrapper_host_dir
 
         wrapper_payload_available = False
 
@@ -4280,20 +4331,24 @@ def install_orthanc(CONFIG):
                     "set -e; "
                     "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
                     "TMP=/tmp/orthanc-wrapper-seed-unpack; "
+                    "REPO_SRC=" + shlex.quote(wrapper_source_dir) + "; "
                     "sudo mkdir -p $TARGET; "
                     "sudo rm -rf $TMP; "
                     "sudo mkdir -p $TMP; "
                     "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
-                    "if [ -f $TMP/init_node.sh ]; then "
-                    "  SRC=$TMP; "
-                    "elif [ -f $TMP/wrapper/init_node.sh ]; then "
+                    "if [ -d \"$TMP/wrapper\" ] && [ -n \"$(find $TMP/wrapper -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
                     "  SRC=$TMP/wrapper; "
+                    "elif [ -f $TMP/init_node.sh ] || [ -f $TMP/app.json ] || [ -f $TMP/restart_node_server.sh ] || [ -f $TMP/update_app.sh ]; then "
+                    "  SRC=$TMP; "
+                    "elif [ -d \"$TMP/bundle\" ] && [ -n \"$(find $TMP/bundle -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
+                    "  SRC=$TMP; "
                     "else "
-                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f -name init_node.sh | head -n1); "
+                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f \( -name init_node.sh -o -name app.json -o -name restart_node_server.sh -o -name update_app.sh \) | head -n1); "
                     "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
                     "fi; "
                     "sudo rm -rf $TARGET/*; "
                     "sudo cp -a $SRC/. $TARGET/; "
+                    "if [ -d \"$REPO_SRC\" ]; then sudo cp -a \"$REPO_SRC\"/. \"$TARGET\"/; fi; "
                     "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
                     "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
                     "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
@@ -4359,24 +4414,34 @@ def install_orthanc(CONFIG):
                 rewrite_orthanc_wrapper_app_json("/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain)
         elif os.path.isfile(wrapper_repo_tar):
             print(" Installing orthanc-wrapper payload (K8s mode)...")
-            cmd(
+            copy_ret = cmd(
                 "sudo bash -lc '"
-                f"set -e; TARGET={shlex.quote(wrapper_host_dir)}; TMP=/tmp/orthanc-wrapper-seed-unpack; TAR={shlex.quote(wrapper_repo_tar)}; "
+                f"set -e; TARGET={shlex.quote(wrapper_host_dir)}; TMP=/tmp/orthanc-wrapper-seed-unpack; TAR={shlex.quote(wrapper_repo_tar)}; REPO_SRC={shlex.quote(wrapper_source_dir)}; "
                 "mkdir -p \"$TARGET\"; rm -rf \"$TMP\"; mkdir -p \"$TMP\"; "
                 "tar -xzf \"$TAR\" -C \"$TMP\"; "
-                "if [ -f \"$TMP/init_node.sh\" ]; then "
-                "  SRC=$TMP; "
-                "elif [ -f \"$TMP/wrapper/init_node.sh\" ]; then "
+                "if [ -d \"$TMP/wrapper\" ] && [ -n \"$(find \"$TMP/wrapper\" -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
                 "  SRC=$TMP/wrapper; "
+                "elif [ -f \"$TMP/init_node.sh\" ] || [ -f \"$TMP/app.json\" ] || [ -f \"$TMP/restart_node_server.sh\" ] || [ -f \"$TMP/update_app.sh\" ]; then "
+                "  SRC=$TMP; "
+                "elif [ -d \"$TMP/bundle\" ] && [ -n \"$(find \"$TMP/bundle\" -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
+                "  SRC=$TMP; "
                 "else "
-                "  FOUND=$(find \"$TMP\" -maxdepth 4 -type f -name init_node.sh | head -n1); "
+                "  FOUND=$(find \"$TMP\" -maxdepth 4 -type f \( -name init_node.sh -o -name app.json -o -name restart_node_server.sh -o -name update_app.sh \) | head -n1); "
                 "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
                 "fi; "
                 "rm -rf \"$TARGET\"/*; cp -a \"$SRC\"/. \"$TARGET\"/; "
+                "if [ -d \"$REPO_SRC\" ]; then cp -a \"$REPO_SRC\"/. \"$TARGET\"/; fi; "
                 "chmod +x \"$TARGET\"/init_node.sh 2>/dev/null || true; "
                 "chmod +x \"$TARGET\"/restart_node_server.sh 2>/dev/null || true; "
                 "chmod +x \"$TARGET\"/update_app.sh 2>/dev/null || true; "
                 "chmod -R 755 \"$TARGET\"'",
+                exit_on_error=False,
+            )
+            if copy_ret != 0:
+                print(f"  Warning: orthanc-wrapper copy command failed with return code {copy_ret}")
+            cmd(
+                f"sudo sh -c 'test -f {shlex.quote(os.path.join(wrapper_host_dir, 'init_node.sh'))} && "
+                f"test -f {shlex.quote(os.path.join(wrapper_host_dir, 'app.json'))}'",
                 exit_on_error=False,
             )
             wrapper_payload_available = (
@@ -4384,9 +4449,14 @@ def install_orthanc(CONFIG):
             )
             if not wrapper_payload_available:
                 print(
-                    "  Warning: orthanc-wrapper payload did not provide init_node.sh; "
+                    f"  Warning: {wrapper_host_dir}/init_node.sh is missing after copy; "
                     "orthanc-wrapper deployment will be skipped"
                 )
+            else:
+                print(f" Orthanc wrapper payload copied to {wrapper_host_dir}")
+
+            if not ensure_orthanc_wrapper_runtime(wrapper_host_dir):
+                print(f"  Warning: orthanc-wrapper runtime dependencies were not installed in {wrapper_host_dir}")
 
             # Keep the wrapper configuration aligned with the current public domain.
             rewrite_orthanc_wrapper_app_json(wrapper_host_dir, CONFIG.public_domain)
@@ -4397,17 +4467,34 @@ def install_orthanc(CONFIG):
                 cmd(f"sudo test -f {shlex.quote(os.path.join(wrapper_host_dir, 'init_node.sh'))}", exit_on_error=False) == 0
             )
             if wrapper_payload_available:
-                print(f" Reusing existing orthanc-wrapper payload from {wrapper_host_dir}")
+                print(f" Reusing existing wrapper payload from {wrapper_host_dir}")
+                if not ensure_orthanc_wrapper_runtime(wrapper_host_dir):
+                    print(f"  Warning: orthanc-wrapper runtime dependencies were not installed in {wrapper_host_dir}")
+                rewrite_orthanc_wrapper_app_json(wrapper_host_dir, CONFIG.public_domain)
 
-        # Copy Lua script from repo into the host-path for Orthanc
+        # Copy Lua script from repo into the host-path(s) for Orthanc.
+        # Orthanc reads /var/lib/orthanc/scripts/script.lua inside the pod, so the file must
+        # exist on the underlying PV/hostPath mounted into the Orthanc storage volume.
         script_source = os.path.join(orthanc_dir, "scripts", "script.lua")
-        script_dest = os.path.join(CONFIG.host_path, "orthanc", "orthanc-storage", "scripts", "script.lua")
+        script_dest_candidates = [
+            os.path.join(CONFIG.host_path, "orthanc", "orthanc-storage", "scripts", "script.lua"),
+            "/var/hostpath-provisioner/orthanc/orthanc-storage/scripts/script.lua",
+            "/pv/orthanc/orthanc-storage/scripts/script.lua",
+        ]
         if os.path.exists(script_source):
-            print(f" Copying script.lua to {script_dest}...")
-            cmd(f"sudo mkdir -p {shlex.quote(os.path.dirname(script_dest))}")
-            cmd(f"sudo cp {shlex.quote(script_source)} {shlex.quote(script_dest)}")
-            cmd(f"sudo chmod 644 {shlex.quote(script_dest)}")
-            print(f" script.lua copied successfully")
+            copied = False
+            for script_dest in script_dest_candidates:
+                dest_dir = os.path.dirname(script_dest)
+                try:
+                    os.makedirs(dest_dir, exist_ok=True)
+                    shutil.copy2(script_source, script_dest)
+                    os.chmod(script_dest, 0o644)
+                    print(f" Copying script.lua to {script_dest}...")
+                    copied = True
+                except Exception as exc:
+                    print(f"  Warning: could not copy script.lua to {script_dest}: {exc}")
+            if copied:
+                print(" script.lua copied successfully")
         else:
             print(f"  Warning: script.lua not found at {script_source}, Orthanc may fail at startup")
 
@@ -4488,10 +4575,10 @@ def install_orthanc(CONFIG):
                                 _env['value'] = _forced_keycloak_uri
                                 break
             if not wrapper_payload_available:
-                _deploy_docs = [
-                    doc for doc in _deploy_docs
-                    if doc.get('metadata', {}).get('name') not in ('orthanc-wrapper', 'orthanc-wrapper-service')
-                ]
+                print(
+                    "  Warning: orthanc-wrapper payload not detected, but wrapper manifests will still be applied "
+                    "as requested"
+                )
             with open("orthanc-deploy.private.yaml", 'w') as _f:
                 yaml.safe_dump_all(_deploy_docs, _f, sort_keys=False)
             cmd("minikube kubectl -- apply -f orthanc-deploy.private.yaml")
