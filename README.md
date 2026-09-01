@@ -126,8 +126,6 @@ Some repositories must be cloned manually before running the installation:
     Notes:
     - Prefer a private/internal IP in `nfs_server`.
     - If `nfs_server` is empty, installer tries `managed-nfs-storage` StorageClass parameters.
-    - Installer persists the mount in `/etc/fstab` and mounts it automatically:
-       `<nfs_server>:<nfs_share> <nfs_share> nfs defaults,_netdev,nofail,x-systemd.automount,proto=tcp 0 0`
 
 2. **eucaim-node-realm.private.json** - Keycloak realm configuration
    - Template: `eucaim-node-realm.json`
