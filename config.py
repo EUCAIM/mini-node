@@ -19,7 +19,14 @@ class Config:
                   f"Auto-correcting to: {resolved}")
             raw_host_path = resolved
         self.host_path = raw_host_path
+
         self.public_domain = cfg['public_domain']
+        # Optional; explicit Kubernetes API server endpoint  "IP:PORT"
+        self.kubeapiserver_ip = cfg.get('kubeapiserver_ip', '')
+        # Optional; NFS endpoint used when host_path depends on an external NFS mount.
+        # Example: nfs_server="192.168.1.241", nfs_share="/pv"
+        self.nfs_server = cfg.get('nfs_server', 'kubeserver.localdomain')
+        self.nfs_share = cfg.get('nfs_share', '/pv')
         
         # Optional: Use Gateway API instead of traditional Ingress (default: False for backward compatibility)
         self.use_gateway_api = cfg.get('use_gateway_api', False)

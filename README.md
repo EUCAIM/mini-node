@@ -109,6 +109,26 @@ Some repositories must be cloned manually before running the installation:
    nano config.private.yaml
    ```
 
+   Optional field for user-management jobs talking to kube-apiserver:
+   ```yaml
+   kubeapiserver_ip: "kubeserver.localdomain:6443"
+   ```
+   Notes:
+   - Use `IP:PORT` format.
+   - Default if empty in minikube mode: `kubeserver.localdomain:8443`.
+   - Default if empty in `--k8s` mode: `kubeserver.localdomain:6443`.
+
+    Optional fields for NFS host path mounting in `--k8s` mode:
+    ```yaml
+   nfs_server: "kubeserver.localdomain"
+    nfs_share: "/pv"
+    ```
+    Notes:
+    - Prefer a private/internal IP in `nfs_server`.
+    - If `nfs_server` is empty, installer tries `managed-nfs-storage` StorageClass parameters.
+    - Installer persists the mount in `/etc/fstab` and mounts it automatically:
+       `<nfs_server>:<nfs_share> <nfs_share> nfs defaults,_netdev,nofail,x-systemd.automount,proto=tcp 0 0`
+
 2. **eucaim-node-realm.private.json** - Keycloak realm configuration
    - Template: `eucaim-node-realm.json`
    - Contains: client secrets, realm settings, identity providers

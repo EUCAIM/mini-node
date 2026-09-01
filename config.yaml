@@ -4,6 +4,20 @@ host_path: "/home/ubuntu/minikube-data/"
 public_domain: "mininode.imaging.i3m.upv.es"
   # The public domain where the node will be accessible
 
+kubeapiserver_ip: "kubeserver.localdomain:6443"
+  # Optional. Kubernetes API server endpoint used by user-management jobs.
+  # Format: "HOST:PORT" (example: "kubeserver.localdomain:6443")
+  # If empty, defaults are:
+  # - minikube mode: kubeserver.localdomain:8443
+  # - --k8s mode:    kubeserver.localdomain:6443
+
+nfs_server: "kubeserver.localdomain"
+  # Optional. NFS server host/IP for mounting the host_path root in --k8s mode.
+  # Example: nfs_server="kubeserver.localdomain", nfs_share="/pv"
+nfs_share: "/pv"
+  # Optional. Exported NFS share path to mount (default: /pv).
+
+
 postgres:
   db_password: "yourdbpassword"
   username: "yourusername"

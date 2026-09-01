@@ -125,6 +125,7 @@ def get_node_ip():
         except subprocess.CalledProcessError:
             return ""
 
+
 def _normalize_storage_class_name(value: str) -> str:
     """Normalize jsonpath output to a single storage class name."""
     value = (value or "").strip().strip("'\"")
@@ -184,6 +185,11 @@ def _nfs_server_base():
     Returns (server, base_path) or (None, None) in minikube mode or if not found."""
     if USE_MINIKUBE:
         return None, None
+    # Config override takes precedence, so private/internal IPs can be enforced.
+    cfg_server = str(getattr(CONFIG, 'nfs_server', '') or '').strip() if CONFIG is not None else ''
+    cfg_share = str(getattr(CONFIG, 'nfs_share', '') or '').strip() if CONFIG is not None else ''
+    if cfg_server:
+        return cfg_server, (cfg_share or "/pv")
     server = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
     share = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip()
     if server and share:
@@ -191,6 +197,48 @@ def _nfs_server_base():
     if server:
         return server, "/pv"
     return None, None
+
+
+def ensure_nfs_hostpath_mount(config):
+    """Ensure NFS share for host_path root is persistently mounted in --k8s mode.
+
+    This prevents jobs from failing with missing directories like
+    /pv/data/homes/users when host_path is backed by NFS.
+    """
+    if USE_MINIKUBE:
+        return
+
+    host_path = str(getattr(config, 'host_path', '') or '').strip()
+    if not host_path.startswith('/'):
+        return
+
+    nfs_server, nfs_share = _nfs_server_base()
+    if not nfs_server:
+        if host_path == '/pv' or host_path.startswith('/pv/'):
+            print(" Warning: host_path is under /pv but no NFS server configured/detected.")
+            print("  Set nfs_server in config.private.yaml to auto-mount and persist /pv in /etc/fstab.")
+        return
+
+    mount_point = (nfs_share or '/pv').strip()
+    source = f"{nfs_server}:{nfs_share or '/pv'}"
+    fstab_opts = "defaults,_netdev,nofail,x-systemd.automount,proto=tcp"
+    fstab_line = f"{source} {mount_point} nfs {fstab_opts} 0 0"
+
+    print(f" Ensuring NFS mount for host path root: {source} -> {mount_point}")
+    cmd(f"sudo mkdir -p {shlex.quote(mount_point)}", exit_on_error=False)
+
+    # Replace previous entry for this mount point to avoid duplicates/stale server IPs.
+    mp_pattern = mount_point.replace('/', r'\/')
+    cmd(f"sudo sed -i '/[[:space:]]{mp_pattern}[[:space:]]/d' /etc/fstab", exit_on_error=False)
+    cmd(f"echo {shlex.quote(fstab_line)} | sudo tee -a /etc/fstab > /dev/null", exit_on_error=False)
+    cmd("sudo systemctl daemon-reload", exit_on_error=False)
+    cmd(f"sudo mountpoint -q {shlex.quote(mount_point)} || sudo mount {shlex.quote(mount_point)}", exit_on_error=False)
+
+    mounted_from = cmd_output(f"findmnt -n -o SOURCE --target {shlex.quote(mount_point)} 2>/dev/null").strip()
+    if mounted_from:
+        print(f" NFS mount active on {mount_point}: {mounted_from}")
+    else:
+        print(f"  Warning: could not verify active mount on {mount_point}")
 
 
 def _convert_hostpath_pvs_to_nfs(yaml_path: str, namespace: str = ""):
@@ -632,8 +680,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if USE_MINIKUBE:
         _kc_base = "/var/hostpath-provisioner/keycloak"
     else:
-        nfs_server = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
-        nfs_share = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip()
+        nfs_server, nfs_share = _nfs_server_base()
         if nfs_server and nfs_share:
             _kc_base = os.path.join(nfs_share, "keycloak")
             print(f" Using NFS base: {nfs_server}:{_kc_base}")
@@ -800,15 +847,14 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         pv_docs  = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolume"]
         pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
 
-        # In K8s mode, detect NFS server from managed-nfs-storage StorageClass
+        # In K8s mode, resolve NFS endpoint (config override first, then StorageClass)
         nfs_server = None
         nfs_base = "/pv"
 
         if not USE_MINIKUBE:
-            nfs_info = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
-            if nfs_info:
-                nfs_server = nfs_info
-                nfs_base = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip() or "/pv"
+            nfs_info = _nfs_server_base()
+            if nfs_info[0]:
+                nfs_server, nfs_base = nfs_info
                 print(f" Detected NFS server: {nfs_server}{nfs_base}")
 
         for d in pv_docs:
@@ -2294,11 +2340,21 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     else:
         print(f" Service account token retrieved successfully")
 
+    # Build host homes path from config so K8s deployments do not keep minikube defaults.
+    host_homes_users_path = os.path.join(CONFIG.host_path, "data", "homes", "users")
+    default_homes_users_path = "/var/hostpath-provisioner/data/homes/users"
+
     # Read the template file
     with open(template_file, 'r') as f:
         content = f.read()
 
     # Replace all placeholders with actual values
+    kube_apiserver_endpoint = str(getattr(CONFIG, 'kubeapiserver_ip', '') or '').strip()
+    if not kube_apiserver_endpoint:
+        kube_apiserver_endpoint = 'kubeserver.localdomain:8443' if USE_MINIKUBE else 'kubeserver.localdomain:6443'
+    if not kube_apiserver_endpoint.startswith('http://') and not kube_apiserver_endpoint.startswith('https://'):
+        kube_apiserver_endpoint = f'https://{kube_apiserver_endpoint}'
+
     replacements = {
         '__KEYCLOAK_TOKEN_ENDPOINT__': f'https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token',
         '__KEYCLOAK_ADMIN_ENDPOINT__': f'https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/',
@@ -2311,12 +2367,15 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
         '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
         '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',
-        '__K8S_ENDPOINT__': f'https://{get_node_ip()}:8443',
+        '__K8S_ENDPOINT__': kube_apiserver_endpoint,
         '__K8S_TOKEN__': k8s_token,
     }
 
     for placeholder, value in replacements.items():
         content = content.replace(placeholder, value)
+
+    # Replace hardcoded minikube homes path with host_path-based path.
+    content = content.replace(default_homes_users_path, host_homes_users_path)
 
     # Write to the .private.yaml file
     with open(private_file, 'w') as f:
@@ -2340,6 +2399,13 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     cmd(f"sudo cp {scripts_src_dir}/*.sh {scripts_data_dir}/")
     cmd(f"sudo cp {scripts_src_dir}/*.py {scripts_data_dir}/")
     cmd(f"sudo cp -r {scripts_src_dir}/templates {scripts_data_dir}/templates")
+
+    cmd(
+        f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
+        f"-name 'user-management-job-template.private.yaml' "
+        f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
+    )
+    
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
     print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
 
@@ -2452,6 +2518,13 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
             data['operatorConfiguration']['k8s'] = {}
         data['operatorConfiguration']['k8s']['node_selection'] = False
         print(f" Disabled node_selection in k8s configuration")
+
+        # Prevent DSWS operator from mounting /datalake when host bindfs is not desired.
+        k8s_cfg = data['operatorConfiguration']['k8s']
+        if 'volumes' not in k8s_cfg:
+            k8s_cfg['volumes'] = {}
+        k8s_cfg['volumes']['datalake_path'] = ""
+        print(" Disabled DSWS datalake_path mount (k8s.volumes.datalake_path='')")
 
         # Save updated values
         with open(values_file, 'w') as f:
@@ -4633,12 +4706,12 @@ def install_orthanc(CONFIG):
                 "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
                 " | sudo tee -a /etc/fstab > /dev/null'")
 
-            # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
-            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/dataset-service/datalake/storage_link'")
+            # 2. /mnt/datalake → Orthanc storage_link with symlinks resolved (for desktops/jobman)
+            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/orthanc/orthanc-storage/storage_link'")
             cmd("minikube ssh -- '"
                 "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
-                "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
-                "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage/storage_link"
+                "     /mnt/datalake  fuse.bindfs  ro,resolve-symlinks,perms=o+rD,dev,suid  0  2\\n\""
                 " | sudo tee -a /etc/fstab > /dev/null'")
 
             # 3. /mnt/datasets → datasets (for desktops/jobman)
@@ -4657,8 +4730,9 @@ def install_orthanc(CONFIG):
         else:
             hp = CONFIG.host_path.rstrip('/')
             datalake_candidates = [
-                f"{hp}/dataset-service/datalake/storage_link",
+                f"{hp}/orthanc/orthanc-storage/storage_link",
                 f"{hp}/dataset-service/dataset-service-data/datalake/storage_link",
+                f"{hp}/dataset-service/datalake/storage_link",
                 f"{hp}/dataset-service/datasets/storage_link",
                 f"{hp}/dataset-service/datasets",
             ]
@@ -4669,6 +4743,7 @@ def install_orthanc(CONFIG):
             cmd("sudo mkdir -p /mnt /mnt/datalake /mnt/datasets /var/lib/orthanc", exit_on_error=False)
             for d in [
                 f"{hp}/orthanc/orthanc-storage",
+                f"{hp}/orthanc/orthanc-storage/storage_link",
                 f"{hp}/dataset-service/datalake/storage_link",
                 f"{hp}/dataset-service/datasets",
             ]:
@@ -4677,7 +4752,7 @@ def install_orthanc(CONFIG):
             print(" SKIP bindfs auto-mount (K8s mode)")
             print("  >> ADMIN: run these on EACH cluster node and persist in /etc/fstab:")
             print(f"      bindfs {hp}/orthanc/orthanc-storage /var/lib/orthanc -o nouser,ro,resolve-symlinks,perms=o+rD")
-            print(f"      bindfs {datalake_src} /mnt/datalake -o nouser,ro,resolve-symlinks,perms=o+rD")
+            print(f"      bindfs {datalake_src} /mnt/datalake -o ro,resolve-symlinks,perms=o+rD,dev,suid")
             print(f"      bindfs {datasets_src} /mnt/datasets -o nouser,ro,resolve-symlinks,perms=o+rD")
 
         print(f" Orthanc installation completed")
@@ -4912,6 +4987,9 @@ def install(flavor):
     print(f" Starting installation with flavor: {flavor}")
     print(f" Configuration loaded from: {DEFAULT_CONFIG_FILE_PATH}")
     print(f" Domain: {CONFIG.public_domain}")
+
+    # In --k8s mode, ensure NFS-backed host_path roots (e.g. /pv) are mounted and persistent.
+    ensure_nfs_hostpath_mount(CONFIG)
 
     # Check if Gateway API should be used (default: False for backward compatibility)
     use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
