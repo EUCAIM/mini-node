@@ -2516,14 +2516,23 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         # Disable node selection (minikube has a single node, no scheduling constraints needed)
         if 'k8s' not in data['operatorConfiguration']:
             data['operatorConfiguration']['k8s'] = {}
-        data['operatorConfiguration']['k8s']['node_selection'] = False
+
+        k8s_cfg = data['operatorConfiguration']['k8s']
+        k8s_cfg['node_selection'] = False
         print(f" Disabled node_selection in k8s configuration")
 
-        # Prevent DSWS operator from mounting /datalake when host bindfs is not desired.
-        k8s_cfg = data['operatorConfiguration']['k8s']
+        # Only change the volume paths requested for real K8s deployments.
         if 'volumes' not in k8s_cfg:
             k8s_cfg['volumes'] = {}
-        k8s_cfg['volumes']['datalake_path'] = ""
+        volumes = k8s_cfg['volumes']
+
+        if not USE_MINIKUBE:
+            volumes['datasets_path'] = '/pv/dataset-service/datasets'
+            volumes['persistent_homes_path'] = '/tmp/data/homes/users'
+            volumes['persistent_shared_folder_path'] = '/pv/data/homes/shared-folder'
+            print(" Updated DSWS volume paths for cluster deployment")
+
+        volumes['datalake_path'] = ""
         print(" Disabled DSWS datalake_path mount (k8s.volumes.datalake_path='')")
 
         # Save updated values
