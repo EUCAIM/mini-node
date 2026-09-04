@@ -2635,50 +2635,62 @@ fi
 
     # Check if OIDC is already configured
     print(" Checking current kube-apiserver configuration...")
-    check_oidc = cmd("minikube ssh -- 'sudo grep -q oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml && echo FOUND || echo NOT_FOUND'", exit_on_error=False)
+    check_oidc = cmd_output(
+        "minikube ssh -- 'if sudo grep -q -- --oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml; then echo FOUND; else echo NOT_FOUND; fi'"
+    ).strip()
 
-    if check_oidc == 0:
-        # Check output to see if OIDC is configured
-        output = cmd_output("minikube ssh -- 'sudo grep -q oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml && echo FOUND || echo NOT_FOUND'").strip()
+    if check_oidc == 'FOUND':
+        current_domain = cmd_output(
+            "minikube ssh -- 'sudo grep -m 1 -- --oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml || true'"
+        ).strip()
 
-        if 'FOUND' in output:
-            # Check if it's the correct domain
-            current_domain = cmd_output(f"minikube ssh -- 'sudo grep oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml'").strip()
-
-            if CONFIG.public_domain in current_domain:
-                print(f" kube-apiserver already configured with OIDC for {CONFIG.public_domain}")
-                return
-            else:
-                print(f" Updating kube-apiserver OIDC configuration to use {CONFIG.public_domain}")
+        if CONFIG.public_domain in current_domain:
+            print(f" kube-apiserver already configured with OIDC for {CONFIG.public_domain}")
+            return
+        else:
+            print(f" Updating kube-apiserver OIDC configuration to use {CONFIG.public_domain}")
 
     print(f" Configuring kube-apiserver with OIDC for domain: {CONFIG.public_domain}")
 
-    # Create a bash script to modify the YAML in-place (avoids needing Python YAML library)
-    modify_script = f'''set -e
+    # Create a bash script to modify the YAML in-place. This keeps the edit
+    # idempotent and avoids the fragile quoting issues from the previous awk version.
+    modify_script = f'''#!/bin/bash
+set -euo pipefail
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
-TEMP_YAML="/tmp/kube-apiserver-temp.yaml"
+TMP_YAML="$(mktemp)"
+trap 'rm -f "$TMP_YAML"' EXIT
 
-# Remove any existing OIDC flags first and save to temp file
-grep -v -- '--oidc-issuer-url' "$APISERVER_YAML" | \\
-grep -v -- '--oidc-client-id' | \\
-grep -v -- '--oidc-username-claim' | \\
-grep -v -- '--oidc-username-prefix' | \\
-grep -v -- '--oidc-groups-claim' | \\
-grep -v -- '--oidc-groups-prefix' > "$TEMP_YAML"
+if [ ! -f "$APISERVER_YAML" ]; then
+    echo "Missing kube-apiserver manifest: $APISERVER_YAML" >&2
+    exit 1
+fi
 
-# Find the line with --tls-private-key-file and insert OIDC flags after it
-awk '{{
-    print $0
+# Remove any existing OIDC flags first.
+grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "$TMP_YAML"
+
+# Insert the required flags immediately after the TLS key-file entry.
+awk -v issuer="https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE" '
+BEGIN {{ found=0 }}
+{{
+    print
     if ($0 ~ /--tls-private-key-file/) {{
-        print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
+        print "    - --oidc-issuer-url=" issuer
         print "    - --oidc-client-id=kubernetes"
         print "    - --oidc-username-claim=preferred_username"
-        print "    - \\"--oidc-username-prefix=oidc:\\""
+        print "    - --oidc-username-prefix=oidc:"
         print "    - --oidc-groups-claim=groups"
-        print "    - \\"--oidc-groups-prefix=oidc:\\""
+        print "    - --oidc-groups-prefix=oidc:"
+        found=1
     }}
-}}' "$TEMP_YAML" > "$APISERVER_YAML"
+}}
+END {{
+    if (!found) {{
+        print "ERROR: --tls-private-key-file not found in kube-apiserver manifest" > "/dev/stderr"
+        exit 1
+    }}
+}}
+' "$TEMP_YAML" > "$APISERVER_YAML"
 
 # Clean up
 rm -f "$TEMP_YAML"
@@ -4213,7 +4225,7 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
         webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
 
         # Read and process settings.json template
-        settings_template_file = os.path.join(os.path.expanduser("~"), "mini-node", "jobman-settings.json")
+        settings_template_file = os.path.join(SCRIPT_DIR, "jobman-settings.json")
         if os.path.exists(settings_template_file):
             with open(settings_template_file, 'r') as f:
                 settings_content = f.read()
