@@ -77,7 +77,7 @@ focus:
     # Short provider identifier, e.g. 'upv' — used in beam app IDs
   focus_api_key: "changeme"
     # API key for the focus application (from beam broker registration)
-  dataset_service_auth_header: "Basic changeme"
+  dataset_service_auth_header: "changeme"
     # Authorization header value for dataset-service API calls (Base64 encoded credentials)
   beam_broker_url: "https://broker.eucaim.cancerimage.eu"
     # URL of the EUCAIM beam broker

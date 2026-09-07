@@ -1451,6 +1451,7 @@ def install_dataset_service(auth_client_secret: str):
                                     config["self"]["root_url"] = f"https://{CONFIG.public_domain}/dataset-service"
                                     config["self"]["dataset_link_format"] = \
                                         f"https://{CONFIG.public_domain}/dataset-service/datasets/%s/details"
+                                    config["self"]["eucaim_search_token"] = CONFIG.focus.dataset_service_auth_header
 
                                 tracer_url = CONFIG.tracer.url if hasattr(CONFIG, 'tracer') and hasattr(CONFIG.tracer, 'url') and CONFIG.tracer.url else None
                                 config = configure_tracer_service(config, tracer_url)
@@ -3996,7 +3997,7 @@ def install_fed_search(CONFIG):
             f"minikube kubectl -- create secret generic api-keys"
             f" --namespace federated-search"
             f" --from-literal=FOCUS_API_KEY={CONFIG.focus.focus_api_key}"
-            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='{CONFIG.focus.dataset_service_auth_header}'"
+            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='Secret {CONFIG.focus.dataset_service_auth_header}'"
             f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
         )
         print(" Secret 'api-keys' applied")
