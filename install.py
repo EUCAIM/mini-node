@@ -126,6 +126,92 @@ def get_node_ip():
             return ""
 
 
+def ensure_orthanc_keycloak_client(auth_client_secrets: 'Auth_client_secrets') -> bool:
+    """Ensure the Keycloak client 'orthanc' exists even when realm re-import is skipped.
+
+    Returns True if client exists/was created, False otherwise.
+    """
+    if CONFIG is None:
+        return False
+
+    auth_endpoint = f"https://{CONFIG.public_domain}/auth/realms/master/protocol/openid-connect/token"
+    keycloak_admin_api_endpoint = f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
+
+    orthanc_client = {
+        "clientId": "orthanc",
+        "name": "",
+        "description": "",
+        "rootUrl": f"https://{CONFIG.public_domain}/orthanc",
+        "adminUrl": f"https://{CONFIG.public_domain}/orthanc",
+        "baseUrl": f"https://{CONFIG.public_domain}/orthanc",
+        "enabled": True,
+        "clientAuthenticatorType": "client-secret",
+        "secret": auth_client_secrets.CLIENT_ORTHANC_SECRET,
+        "redirectUris": [
+            f"https://{CONFIG.public_domain}/orthanc/*"
+        ],
+        "webOrigins": [
+            f"https://{CONFIG.public_domain}"
+        ],
+        "bearerOnly": False,
+        "consentRequired": False,
+        "standardFlowEnabled": True,
+        "implicitFlowEnabled": False,
+        "directAccessGrantsEnabled": False,
+        "serviceAccountsEnabled": False,
+        "publicClient": False,
+        "frontchannelLogout": True,
+        "protocol": "openid-connect",
+        "fullScopeAllowed": False,
+        "defaultClientScopes": [
+            "web-origins",
+            "acr",
+            "roles",
+            "profile",
+            "basic",
+            "email"
+        ],
+        "optionalClientScopes": [
+            "address",
+            "phone",
+            "offline_access",
+            "microprofile-jwt"
+        ]
+    }
+
+    max_wait = 180
+    waited = 0
+    while waited < max_wait:
+        try:
+            auth_client = AuthClient(
+                auth_endpoint,
+                'admin-cli',
+                login_as_service_account=False,
+                username=CONFIG.keycloak.admin_username,
+                password=CONFIG.keycloak.admin_password,
+            )
+            admin_client = KeycloakAdminAPIClient(auth_client, keycloak_admin_api_endpoint)
+            existing = admin_client.getClientByClientId("orthanc")
+            if existing:
+                print(" Keycloak client 'orthanc' already exists")
+                return True
+
+            admin_client.createClient(orthanc_client)
+            print(" Keycloak client 'orthanc' created successfully")
+            return True
+        except Exception as e:
+            if waited == 0:
+                print(" Waiting for Keycloak admin API before ensuring 'orthanc' client...")
+            if waited > 0 and waited % 30 == 0:
+                print(f"  Still waiting for Keycloak admin API... ({waited}/{max_wait}s)")
+            time.sleep(5)
+            waited += 5
+            last_error = e
+
+    print(f"  Warning: could not ensure Keycloak client 'orthanc': {last_error}")
+    return False
+
+
 def _normalize_storage_class_name(value: str) -> str:
     """Normalize jsonpath output to a single storage class name."""
     value = (value or "").strip().strip("'\"")
@@ -284,6 +370,100 @@ def _convert_hostpath_pvs_to_nfs(yaml_path: str, namespace: str = ""):
     with open(private_path, "w") as f:
         yaml.safe_dump_all(docs, f, sort_keys=False)
     return private_path
+
+
+def _convert_homes_volume_to_nfs(yaml_path: str):
+    """Convert homes-volume hostPath mounts in workload manifests to NFS in --k8s mode.
+
+    Returns True when at least one volume was converted.
+    """
+    if USE_MINIKUBE or not os.path.exists(yaml_path):
+        return False
+
+    nfs_server, nfs_base = _nfs_server_base()
+    if not nfs_server:
+        print(f"  Warning: cannot convert homes-volume to NFS, no nfs_server detected ({yaml_path})")
+        return False
+
+    def _pod_specs(doc: dict):
+        specs = []
+        spec = doc.get("spec") if isinstance(doc, dict) else None
+        if not isinstance(spec, dict):
+            return specs
+
+        # Pod
+        specs.append(spec)
+        # Deployment/Job/DaemonSet/StatefulSet/ReplicaSet
+        tmpl = spec.get("template")
+        if isinstance(tmpl, dict) and isinstance(tmpl.get("spec"), dict):
+            specs.append(tmpl["spec"])
+        # CronJob
+        jt = spec.get("jobTemplate")
+        if isinstance(jt, dict):
+            js = jt.get("spec")
+            if isinstance(js, dict):
+                jt_tmpl = js.get("template")
+                if isinstance(jt_tmpl, dict) and isinstance(jt_tmpl.get("spec"), dict):
+                    specs.append(jt_tmpl["spec"])
+
+        return specs
+
+    def _to_nfs_path(host_path: str) -> str:
+        host_path = (host_path or "").strip()
+        if host_path.startswith("/var/hostpath-provisioner"):
+            return nfs_base + host_path.replace("/var/hostpath-provisioner", "")
+
+        cfg_host = str(getattr(CONFIG, "host_path", "") or "").rstrip("/") if CONFIG is not None else ""
+        if cfg_host and (host_path == cfg_host or host_path.startswith(cfg_host + "/")):
+            suffix = host_path[len(cfg_host):]
+            return (nfs_base + suffix) if suffix else nfs_base
+
+        if host_path.startswith("/pv"):
+            return host_path
+
+        return f"{nfs_base}/data/homes/users"
+
+    try:
+        with open(yaml_path, "r") as f:
+            docs = list(yaml.safe_load_all(f))
+    except Exception as e:
+        print(f"  Warning: could not parse {yaml_path} for homes-volume conversion: {e}")
+        return False
+
+    changed = False
+    for d in docs:
+        if not isinstance(d, dict):
+            continue
+        for pod_spec in _pod_specs(d):
+            volumes = pod_spec.get("volumes")
+            if not isinstance(volumes, list):
+                continue
+            for vol in volumes:
+                if not isinstance(vol, dict):
+                    continue
+                hp = vol.get("hostPath")
+                if not isinstance(hp, dict):
+                    continue
+
+                hp_path = str(hp.get("path", "") or "")
+                is_homes = (vol.get("name") == "homes-volume") or hp_path.endswith("/data/homes/users")
+                if not is_homes:
+                    continue
+
+                nfs_path = _to_nfs_path(hp_path)
+                cmd(f"sudo mkdir -p {shlex.quote(nfs_path)}", exit_on_error=False)
+                cmd(f"sudo chmod -R 777 {shlex.quote(nfs_path)}", exit_on_error=False)
+                vol.pop("hostPath", None)
+                vol["nfs"] = {"server": nfs_server, "path": nfs_path}
+                changed = True
+                print(f"  Converted homes-volume hostPath -> NFS: {nfs_server}:{nfs_path}")
+
+    if not changed:
+        return False
+
+    with open(yaml_path, "w") as f:
+        yaml.safe_dump_all(docs, f, sort_keys=False)
+    return True
 
 
 ## Function to execute shell commands
@@ -665,6 +845,7 @@ class Auth_client_secrets():
         self.CLIENT_DATASET_SERVICE_SECRET = existing_secrets.get('dataset-service', generate_random_password(32))
         self.CLIENT_FEM_CLIENT_SECRET = existing_secrets.get('fem-client', generate_random_password(32))
         self.CLIENT_JOBMAN_SERVICE_SECRET = existing_secrets.get('jobman-service', generate_random_password(32))
+        self.CLIENT_ORTHANC_SECRET = existing_secrets.get('orthanc', generate_random_password(32))
         self.CLIENT_KUBERNETES_SECRET = existing_secrets.get('kubernetes', generate_random_password(32))
         self.CLIENT_KUBERNETES_OPERATOR_SECRET = existing_secrets.get('kubernetes-operator', generate_random_password(32))
 
@@ -1006,12 +1187,17 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         with open(realm_config_file_private_path, "wt") as fout:
             for line in fin:
                 l = line.replace("{{ PUBLIC_DOMAIN }}", CONFIG.public_domain)
-                l = l.replace("{{ IDP_LSRI_ENABLED }}", CONFIG.keycloak.idp_lsri.enabled)
+                l = l.replace(
+                    '"{{ IDP_LSRI_ENABLED }}"',
+                    str(CONFIG.keycloak.idp_lsri.enabled).strip().lower(),
+                )
+                l = l.replace("{{ IDP_LSRI_ENABLED }}", str(CONFIG.keycloak.idp_lsri.enabled).strip().lower())
                 l = l.replace("{{ IDP_LSRI_CLIENT_ID }}", CONFIG.keycloak.idp_lsri.client_id)
                 l = l.replace("{{ IDP_LSRI_CLIENT_SECRET }}", CONFIG.keycloak.idp_lsri.client_secret)
                 l = l.replace("{{ CLIENT_DATASET_SERVICE_SECRET }}", auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
                 l = l.replace("{{ CLIENT_FEM_CLIENT_SECRET }}", auth_client_secrets.CLIENT_FEM_CLIENT_SECRET)
                 l = l.replace("{{ CLIENT_JOBMAN_SERVICE_SECRET }}", auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
+                l = l.replace("{{ CLIENT_ORTHANC_SECRET }}", auth_client_secrets.CLIENT_ORTHANC_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
                 fout.write(l)
@@ -1102,6 +1288,9 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
         if use_tls:
             print("TLS certificate will be automatically provisioned by cert-manager")
+
+    print(" Ensuring Keycloak client 'orthanc' exists...")
+    ensure_orthanc_keycloak_client(auth_client_secrets)
 
     os.chdir("..")
 
@@ -2351,7 +2540,8 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     # Replace all placeholders with actual values
     kube_apiserver_endpoint = str(getattr(CONFIG, 'kubeapiserver_ip', '') or '').strip()
     if not kube_apiserver_endpoint:
-        kube_apiserver_endpoint = 'kubeserver.localdomain:8443' if USE_MINIKUBE else 'kubeserver.localdomain:6443'
+        # Use in-cluster API service in --k8s mode so jobs do not depend on external DNS.
+        kube_apiserver_endpoint = 'kubeserver.localdomain:8443' if USE_MINIKUBE else 'kubernetes.default.svc:443'
     if not kube_apiserver_endpoint.startswith('http://') and not kube_apiserver_endpoint.startswith('https://'):
         kube_apiserver_endpoint = f'https://{kube_apiserver_endpoint}'
 
@@ -2381,6 +2571,9 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     with open(private_file, 'w') as f:
         f.write(content)
 
+    # In --k8s mode, avoid node-local hostPath requirements for homes-volume.
+    _convert_homes_volume_to_nfs(private_file)
+
     print(f" Created private configuration: {private_file}")
     print(f" User management job template configured successfully")
 
@@ -2404,6 +2597,18 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
         f"-name 'user-management-job-template.private.yaml' "
         f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
+    )
+
+    # Enforce the selected Kubernetes API endpoint in copied templates as well,
+    # so stale files in the data volume do not keep old external hostnames.
+    endpoint_escaped = kube_apiserver_endpoint.replace('/', r'\/')
+    cmd(
+        f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
+        f"\\( -name 'user-management-job-template.yaml' -o -name 'user-management-job-template.private.yaml' \\) "
+        f"-exec sed -i 's#https://kubeserver\\.localdomain:6443#{endpoint_escaped}#g;"
+        f"s#kubeserver\\.localdomain:6443#{kube_apiserver_endpoint}#g;"
+        f"s#https://kubeserver\\.localdomain:8443#{endpoint_escaped}#g;"
+        f"s#kubeserver\\.localdomain:8443#{kube_apiserver_endpoint}#g' {{}} +"
     )
     
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
@@ -4371,7 +4576,7 @@ def apply_pod_priorities():
 
     print(f" Pod priority classes applied successfully")
 
-def install_orthanc(CONFIG):
+def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
     '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
     print(f"\n{'='*80}")
     print(" Installing Orthanc PACS Server")
@@ -4611,7 +4816,7 @@ def install_orthanc(CONFIG):
             db_keycloak_password_q = shlex.quote(oc.db_keycloak_password or '')
             kc_admin_user_q = shlex.quote(oc.kc_admin_user or '')
             kc_admin_password_q = shlex.quote(oc.kc_admin_password or '')
-            kc_client_secret_q = shlex.quote(oc.kc_client_secret or '')
+            kc_client_secret_q = shlex.quote(auth_client_secrets.CLIENT_ORTHANC_SECRET)
             svc_user_q = shlex.quote(svc_user)
             svc_pw_q = shlex.quote(svc_pw)
             users_json_q = shlex.quote(users_json)
@@ -4642,11 +4847,7 @@ def install_orthanc(CONFIG):
                 _cm_content = _f.read()
             _cm_content = _cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
             _cm_content = _cm_content.replace("ORTHANC_NODE_NAME", CONFIG.orthanc.node_name)
-
-            _orthanc_client_id = 'orthanc'
-            if oc and getattr(oc, 'kc_client_id', None):
-                _orthanc_client_id = oc.kc_client_id
-            _cm_content = _cm_content.replace("ORTHANC_KEYCLOAK_CLIENT_ID", _orthanc_client_id)
+            _cm_content = _cm_content.replace("ORTHANC_KEYCLOAK_CLIENT_ID", "orthanc")
             with open("orthanc-cm.private.yaml", 'w') as _f:
                 _f.write(_cm_content)
             cmd("minikube kubectl -- apply -f orthanc-cm.private.yaml")
@@ -5117,7 +5318,7 @@ def install(flavor):
 
     # Orthanc PACS server is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
-        install_orthanc(CONFIG)
+        install_orthanc(CONFIG, auth_client_secrets)
 
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "mini", "standard"]:
