@@ -2863,6 +2863,7 @@ fi
 set -euo pipefail
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
+BACKUP_YAML="${{APISERVER_YAML}}.oidc-backup"
 TMP_YAML="$(mktemp)"
 trap 'rm -f "$TMP_YAML"' EXIT
 
@@ -2870,6 +2871,9 @@ if [ ! -f "$APISERVER_YAML" ]; then
     echo "Missing kube-apiserver manifest: $APISERVER_YAML" >&2
     exit 1
 fi
+
+# Preserve the original manifest so we can restore it if the apiserver fails to come back.
+cp -f "$APISERVER_YAML" "$BACKUP_YAML"
 
 # Remove any existing OIDC flags first.
 grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "$TMP_YAML"
@@ -2896,9 +2900,6 @@ END {{
     }}
 }}
 ' "$TMP_YAML" > "$APISERVER_YAML"
-
-# Clean up
-rm -f "$TMP_YAML"
 
 echo "OIDC configuration applied successfully"
 '''
@@ -2933,8 +2934,11 @@ echo "OIDC configuration applied successfully"
             print(f"   Still waiting for apiserver... ({waited}s)")
 
     if waited >= max_wait:
-        print(f"  Warning: apiserver took longer than expected to restart")
-        print(f"   You may need to check manually with: kubectl get pods -n kube-system")
+        print(f"  ERROR: kube-apiserver did not become ready after OIDC patching")
+        print(f"   Rolling back the OIDC manifest change to restore the API server before continuing.")
+        cmd("minikube ssh -- 'sudo cp -f /etc/kubernetes/manifests/kube-apiserver.yaml.oidc-backup /etc/kubernetes/manifests/kube-apiserver.yaml'")
+        print(f"   Restored kube-apiserver manifest from backup. Continuing without OIDC patch for now.")
+        return
 
     # Verify OIDC configuration
     print("\n Verifying OIDC configuration...")
