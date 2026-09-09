@@ -2895,10 +2895,10 @@ END {{
         exit 1
     }}
 }}
-' "$TEMP_YAML" > "$APISERVER_YAML"
+' "$TMP_YAML" > "$APISERVER_YAML"
 
 # Clean up
-rm -f "$TEMP_YAML"
+rm -f "$TMP_YAML"
 
 echo "OIDC configuration applied successfully"
 '''
