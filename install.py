@@ -126,92 +126,6 @@ def get_node_ip():
             return ""
 
 
-def ensure_orthanc_keycloak_client(auth_client_secrets: 'Auth_client_secrets') -> bool:
-    """Ensure the Keycloak client 'orthanc' exists even when realm re-import is skipped.
-
-    Returns True if client exists/was created, False otherwise.
-    """
-    if CONFIG is None:
-        return False
-
-    auth_endpoint = f"https://{CONFIG.public_domain}/auth/realms/master/protocol/openid-connect/token"
-    keycloak_admin_api_endpoint = f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
-
-    orthanc_client = {
-        "clientId": "orthanc",
-        "name": "",
-        "description": "",
-        "rootUrl": f"https://{CONFIG.public_domain}/orthanc",
-        "adminUrl": f"https://{CONFIG.public_domain}/orthanc",
-        "baseUrl": f"https://{CONFIG.public_domain}/orthanc",
-        "enabled": True,
-        "clientAuthenticatorType": "client-secret",
-        "secret": auth_client_secrets.CLIENT_ORTHANC_SECRET,
-        "redirectUris": [
-            f"https://{CONFIG.public_domain}/orthanc/*"
-        ],
-        "webOrigins": [
-            f"https://{CONFIG.public_domain}"
-        ],
-        "bearerOnly": False,
-        "consentRequired": False,
-        "standardFlowEnabled": True,
-        "implicitFlowEnabled": False,
-        "directAccessGrantsEnabled": False,
-        "serviceAccountsEnabled": False,
-        "publicClient": False,
-        "frontchannelLogout": True,
-        "protocol": "openid-connect",
-        "fullScopeAllowed": False,
-        "defaultClientScopes": [
-            "web-origins",
-            "acr",
-            "roles",
-            "profile",
-            "basic",
-            "email"
-        ],
-        "optionalClientScopes": [
-            "address",
-            "phone",
-            "offline_access",
-            "microprofile-jwt"
-        ]
-    }
-
-    max_wait = 180
-    waited = 0
-    while waited < max_wait:
-        try:
-            auth_client = AuthClient(
-                auth_endpoint,
-                'admin-cli',
-                login_as_service_account=False,
-                username=CONFIG.keycloak.admin_username,
-                password=CONFIG.keycloak.admin_password,
-            )
-            admin_client = KeycloakAdminAPIClient(auth_client, keycloak_admin_api_endpoint)
-            existing = admin_client.getClientByClientId("orthanc")
-            if existing:
-                print(" Keycloak client 'orthanc' already exists")
-                return True
-
-            admin_client.createClient(orthanc_client)
-            print(" Keycloak client 'orthanc' created successfully")
-            return True
-        except Exception as e:
-            if waited == 0:
-                print(" Waiting for Keycloak admin API before ensuring 'orthanc' client...")
-            if waited > 0 and waited % 30 == 0:
-                print(f"  Still waiting for Keycloak admin API... ({waited}/{max_wait}s)")
-            time.sleep(5)
-            waited += 5
-            last_error = e
-
-    print(f"  Warning: could not ensure Keycloak client 'orthanc': {last_error}")
-    return False
-
-
 def _normalize_storage_class_name(value: str) -> str:
     """Normalize jsonpath output to a single storage class name."""
     value = (value or "").strip().strip("'\"")
@@ -370,100 +284,6 @@ def _convert_hostpath_pvs_to_nfs(yaml_path: str, namespace: str = ""):
     with open(private_path, "w") as f:
         yaml.safe_dump_all(docs, f, sort_keys=False)
     return private_path
-
-
-def _convert_homes_volume_to_nfs(yaml_path: str):
-    """Convert homes-volume hostPath mounts in workload manifests to NFS in --k8s mode.
-
-    Returns True when at least one volume was converted.
-    """
-    if USE_MINIKUBE or not os.path.exists(yaml_path):
-        return False
-
-    nfs_server, nfs_base = _nfs_server_base()
-    if not nfs_server:
-        print(f"  Warning: cannot convert homes-volume to NFS, no nfs_server detected ({yaml_path})")
-        return False
-
-    def _pod_specs(doc: dict):
-        specs = []
-        spec = doc.get("spec") if isinstance(doc, dict) else None
-        if not isinstance(spec, dict):
-            return specs
-
-        # Pod
-        specs.append(spec)
-        # Deployment/Job/DaemonSet/StatefulSet/ReplicaSet
-        tmpl = spec.get("template")
-        if isinstance(tmpl, dict) and isinstance(tmpl.get("spec"), dict):
-            specs.append(tmpl["spec"])
-        # CronJob
-        jt = spec.get("jobTemplate")
-        if isinstance(jt, dict):
-            js = jt.get("spec")
-            if isinstance(js, dict):
-                jt_tmpl = js.get("template")
-                if isinstance(jt_tmpl, dict) and isinstance(jt_tmpl.get("spec"), dict):
-                    specs.append(jt_tmpl["spec"])
-
-        return specs
-
-    def _to_nfs_path(host_path: str) -> str:
-        host_path = (host_path or "").strip()
-        if host_path.startswith("/var/hostpath-provisioner"):
-            return nfs_base + host_path.replace("/var/hostpath-provisioner", "")
-
-        cfg_host = str(getattr(CONFIG, "host_path", "") or "").rstrip("/") if CONFIG is not None else ""
-        if cfg_host and (host_path == cfg_host or host_path.startswith(cfg_host + "/")):
-            suffix = host_path[len(cfg_host):]
-            return (nfs_base + suffix) if suffix else nfs_base
-
-        if host_path.startswith("/pv"):
-            return host_path
-
-        return f"{nfs_base}/data/homes/users"
-
-    try:
-        with open(yaml_path, "r") as f:
-            docs = list(yaml.safe_load_all(f))
-    except Exception as e:
-        print(f"  Warning: could not parse {yaml_path} for homes-volume conversion: {e}")
-        return False
-
-    changed = False
-    for d in docs:
-        if not isinstance(d, dict):
-            continue
-        for pod_spec in _pod_specs(d):
-            volumes = pod_spec.get("volumes")
-            if not isinstance(volumes, list):
-                continue
-            for vol in volumes:
-                if not isinstance(vol, dict):
-                    continue
-                hp = vol.get("hostPath")
-                if not isinstance(hp, dict):
-                    continue
-
-                hp_path = str(hp.get("path", "") or "")
-                is_homes = (vol.get("name") == "homes-volume") or hp_path.endswith("/data/homes/users")
-                if not is_homes:
-                    continue
-
-                nfs_path = _to_nfs_path(hp_path)
-                cmd(f"sudo mkdir -p {shlex.quote(nfs_path)}", exit_on_error=False)
-                cmd(f"sudo chmod -R 777 {shlex.quote(nfs_path)}", exit_on_error=False)
-                vol.pop("hostPath", None)
-                vol["nfs"] = {"server": nfs_server, "path": nfs_path}
-                changed = True
-                print(f"  Converted homes-volume hostPath -> NFS: {nfs_server}:{nfs_path}")
-
-    if not changed:
-        return False
-
-    with open(yaml_path, "w") as f:
-        yaml.safe_dump_all(docs, f, sort_keys=False)
-    return True
 
 
 ## Function to execute shell commands
@@ -739,6 +559,67 @@ def ensure_namespace_active(namespace: str, timeout_seconds: int = 180) -> bool:
     return final_phase == "Active"
 
 
+def wait_for_kube_apiserver(max_wait: int = 180, interval: int = 5, context: str = "") -> bool:
+    """Wait until kube-apiserver /healthz returns ok."""
+    if context:
+        print(f" Waiting for kube-apiserver to be ready ({context})...")
+    else:
+        print(" Waiting for kube-apiserver to be ready...")
+
+    waited = 0
+    while waited < max_wait:
+        api_ok = cmd_output(f"{KUBECTL} get --raw=/healthz 2>/dev/null").strip().strip("'\"")
+        if api_ok == "ok":
+            print(" kube-apiserver is ready")
+            return True
+        time.sleep(interval)
+        waited += interval
+        if waited % max(15, interval) == 0:
+            print(f"   Still waiting for API server... ({waited}s)")
+
+    print(f"  Warning: kube-apiserver did not become ready after {max_wait}s")
+    return False
+
+
+def rollback_kube_apiserver_oidc_flags() -> bool:
+    """Remove OIDC flags from kube-apiserver manifest and wait for recovery."""
+    print(" Attempting kube-apiserver OIDC rollback (remove --oidc-* flags)...")
+    cmd(
+        "minikube ssh -- '"
+        "APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml; "
+        "if [ -f /tmp/kube-apiserver.yaml.pre-oidc.bak ]; then "
+        "  sudo cp /tmp/kube-apiserver.yaml.pre-oidc.bak $APISERVER_YAML; "
+        "else "
+        "  sudo sed -i \"/--oidc-/d\" $APISERVER_YAML; "
+        "fi'",
+        exit_on_error=False,
+    )
+    return wait_for_kube_apiserver(max_wait=240, interval=5, context="after OIDC rollback")
+
+
+def oidc_issuer_is_reachable(public_domain: str) -> bool:
+    """Return True if OIDC discovery endpoint is reachable from the minikube node."""
+    if not public_domain:
+        return True
+
+    discovery_url = f"https://{public_domain}/auth/realms/EUCAIM-NODE/.well-known/openid-configuration"
+    print(f" Checking OIDC issuer reachability from minikube node: {discovery_url}")
+
+    http_code = cmd_output(
+        "minikube ssh -- '"
+        f"curl -k -sS -o /dev/null -w %{{http_code}} {shlex.quote(discovery_url)} 2>/dev/null || true"
+        "'"
+    ).strip().strip("'\"")
+
+    if http_code == "200":
+        print(" OIDC issuer endpoint is reachable (HTTP 200)")
+        return True
+
+    print(f"  OIDC issuer endpoint is not ready (HTTP {http_code or 'N/A'})")
+    print("  Continuing with kube-apiserver OIDC flag injection anyway")
+    return True
+
+
 def ensure_orthanc_wrapper_runtime(wrapper_dir: str) -> bool:
     """Install the Meteor server dependencies required by the extracted orthanc-wrapper bundle."""
     if not wrapper_dir or not os.path.isdir(wrapper_dir):
@@ -845,7 +726,6 @@ class Auth_client_secrets():
         self.CLIENT_DATASET_SERVICE_SECRET = existing_secrets.get('dataset-service', generate_random_password(32))
         self.CLIENT_FEM_CLIENT_SECRET = existing_secrets.get('fem-client', generate_random_password(32))
         self.CLIENT_JOBMAN_SERVICE_SECRET = existing_secrets.get('jobman-service', generate_random_password(32))
-        self.CLIENT_ORTHANC_SECRET = existing_secrets.get('orthanc', generate_random_password(32))
         self.CLIENT_KUBERNETES_SECRET = existing_secrets.get('kubernetes', generate_random_password(32))
         self.CLIENT_KUBERNETES_OPERATOR_SECRET = existing_secrets.get('kubernetes-operator', generate_random_password(32))
 
@@ -1187,17 +1067,12 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         with open(realm_config_file_private_path, "wt") as fout:
             for line in fin:
                 l = line.replace("{{ PUBLIC_DOMAIN }}", CONFIG.public_domain)
-                l = l.replace(
-                    '"{{ IDP_LSRI_ENABLED }}"',
-                    str(CONFIG.keycloak.idp_lsri.enabled).strip().lower(),
-                )
-                l = l.replace("{{ IDP_LSRI_ENABLED }}", str(CONFIG.keycloak.idp_lsri.enabled).strip().lower())
+                l = l.replace("{{ IDP_LSRI_ENABLED }}", CONFIG.keycloak.idp_lsri.enabled)
                 l = l.replace("{{ IDP_LSRI_CLIENT_ID }}", CONFIG.keycloak.idp_lsri.client_id)
                 l = l.replace("{{ IDP_LSRI_CLIENT_SECRET }}", CONFIG.keycloak.idp_lsri.client_secret)
                 l = l.replace("{{ CLIENT_DATASET_SERVICE_SECRET }}", auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
                 l = l.replace("{{ CLIENT_FEM_CLIENT_SECRET }}", auth_client_secrets.CLIENT_FEM_CLIENT_SECRET)
                 l = l.replace("{{ CLIENT_JOBMAN_SERVICE_SECRET }}", auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
-                l = l.replace("{{ CLIENT_ORTHANC_SECRET }}", auth_client_secrets.CLIENT_ORTHANC_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
                 fout.write(l)
@@ -1288,9 +1163,6 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
 
         if use_tls:
             print("TLS certificate will be automatically provisioned by cert-manager")
-
-    print(" Ensuring Keycloak client 'orthanc' exists...")
-    ensure_orthanc_keycloak_client(auth_client_secrets)
 
     os.chdir("..")
 
@@ -1521,8 +1393,18 @@ def create_dataset_service_pvcs():
     print("  Applying dataset-service PVC manifest (0-pvcs-hostpath.yaml) ...")
 
     pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
-    # Ensure namespace exists
-    cmd("minikube kubectl -- create namespace dataset-service || true")
+    # Ensure kube-apiserver is reachable before namespace/PVC operations.
+    wait_for_kube_apiserver(max_wait=300, interval=5, context="before dataset-service PVC setup")
+
+    # Ensure namespace exists (retry once with --validate=false when OpenAPI is not ready yet).
+    _ns_cmd = f"{KUBECTL} create namespace dataset-service --dry-run=client -o yaml | {KUBECTL} apply -f -"
+    _ns_ret = cmd(_ns_cmd, exit_on_error=False)
+    if _ns_ret != 0:
+        print("  Retrying dataset-service namespace apply with --validate=false...")
+        _ns_cmd_fallback = f"{KUBECTL} create namespace dataset-service --dry-run=client -o yaml | {KUBECTL} apply --validate=false -f -"
+        _ns_ret = cmd(_ns_cmd_fallback, exit_on_error=False)
+    if _ns_ret != 0:
+        print("  Warning: could not ensure dataset-service namespace yet")
 
     # Ensure all required storage directories exist before applying PVCs.
     # If they are missing, pods may fail with "no such file or directory"
@@ -1561,8 +1443,15 @@ def create_dataset_service_pvcs():
 
     _pv_path = _convert_hostpath_pvs_to_nfs(pvcs_path)
     print(f" Applying PV/PVC manifest: {_pv_path} to namespace dataset-service")
-    cmd(f"minikube kubectl -- apply -f {_pv_path} -n dataset-service")
-    cmd("minikube kubectl -- get pvc -n dataset-service")
+    _apply_ret = cmd(f"{KUBECTL} apply -f {_pv_path} -n dataset-service", exit_on_error=False)
+    if _apply_ret != 0:
+        print("  Retrying PV/PVC apply with --validate=false...")
+        _apply_ret = cmd(f"{KUBECTL} apply --validate=false -f {_pv_path} -n dataset-service", exit_on_error=False)
+    if _apply_ret != 0:
+        print("  Warning: failed to apply dataset-service PV/PVC manifest")
+        return False
+
+    cmd(f"{KUBECTL} get pvc -n dataset-service", exit_on_error=False)
     return True
 
 def install_dataset_service(auth_client_secret: str):
@@ -1576,10 +1465,11 @@ def install_dataset_service(auth_client_secret: str):
         db_service_file = "1-db-service.yaml"
         deployment_file = "2-dataset-service.yaml"
 
-        cmd("minikube kubectl -- create namespace dataset-service || true")
+        cmd(f"{KUBECTL} create namespace dataset-service || true", exit_on_error=False)
 
         # Create PVCs first (this will auto-create PVs)
-        create_dataset_service_pvcs()
+        if not create_dataset_service_pvcs():
+            raise RuntimeError("Could not apply dataset-service PVCs because kube-apiserver was unavailable")
 
         # Try to get the current kid from Keycloak JWKS
         print(f" Attempting to fetch current kid from Keycloak JWKS...")
@@ -1713,27 +1603,28 @@ def install_dataset_service(auth_client_secret: str):
             print("Warning: Could not find DATASET_SERVICE_CONFIG to update password and tokens.")
 
         # Apply resources
-        # Ensure kube-apiserver is responsive before applying (it may have restarted for OIDC config)
-        print(f" Waiting for kube-apiserver to be ready before applying manifests...")
-        api_waited = 0
-        while api_waited < 120:
-            api_ok = cmd_output("minikube kubectl -- get --raw=/healthz 2>/dev/null").strip()
-            if api_ok == "ok":
-                print(f" API server ready")
-                break
-            time.sleep(5)
-            api_waited += 5
-            if api_waited % 20 == 0:
-                print(f"   Still waiting for API server... ({api_waited}s)")
-        else:
-            print(f"  Warning: API server may not be ready, proceeding anyway")
+        api_ready = wait_for_kube_apiserver(max_wait=300, interval=5, context="before dataset-service apply")
+        if not api_ready:
+            print("  Warning: API server is still unstable; applying with --validate=false fallback")
 
-        cmd(f"minikube kubectl -- apply -f {db_service_file} -n dataset-service")
-        cmd("minikube kubectl -- apply -f 0-service-account.yaml -n dataset-service")
+        _apply_db = cmd(f"{KUBECTL} apply -f {db_service_file} -n dataset-service", exit_on_error=False)
+        if _apply_db != 0:
+            print("  Retrying database manifest with --validate=false...")
+            cmd(f"{KUBECTL} apply --validate=false -f {db_service_file} -n dataset-service")
 
-        # Delete existing deployment to force recreation with new kid
+        _apply_sa = cmd(f"{KUBECTL} apply -f 0-service-account.yaml -n dataset-service", exit_on_error=False)
+        if _apply_sa != 0:
+            print("  Retrying service account manifest with --validate=false...")
+            cmd(f"{KUBECTL} apply --validate=false -f 0-service-account.yaml -n dataset-service")
+
+        # Delete existing deployment to force recreation with new kid.
+        # Clean up stale DSWS admission webhooks first: the DSWS operator webhook
+        # service is not running yet at this point in the install, and a leftover
+        # MutatingWebhookConfiguration would block this delete (connection refused).
+        print(" Cleaning up stale DSWS admission webhooks that could block deployment delete...")
+        cleanup_stale_dsws_webhooks()
         print(f"\n  Deleting existing dataset-service-backend deployment (if exists)...")
-        cmd("minikube kubectl -- delete deployment dataset-service-backend -n dataset-service --ignore-not-found=true")
+        cmd("minikube kubectl -- delete deployment dataset-service-backend -n dataset-service --ignore-not-found=true", exit_on_error=False)
 
         # Wait a moment for the deployment to be fully deleted
         print(f" Waiting for deployment deletion to complete...")
@@ -1741,7 +1632,10 @@ def install_dataset_service(auth_client_secret: str):
 
         # Apply the new deployment with updated configuration
         print(f" Creating new dataset-service-backend deployment with updated kid...")
-        cmd(f"minikube kubectl -- apply -f {deployment_file} -n dataset-service")
+        _apply_deploy = cmd(f"{KUBECTL} apply -f {deployment_file} -n dataset-service", exit_on_error=False)
+        if _apply_deploy != 0:
+            print("  Retrying deployment manifest with --validate=false...")
+            cmd(f"{KUBECTL} apply --validate=false -f {deployment_file} -n dataset-service")
 
         # Check if we should use Gateway API or traditional Ingress
         use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
@@ -2540,8 +2434,7 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     # Replace all placeholders with actual values
     kube_apiserver_endpoint = str(getattr(CONFIG, 'kubeapiserver_ip', '') or '').strip()
     if not kube_apiserver_endpoint:
-        # Use in-cluster API service in --k8s mode so jobs do not depend on external DNS.
-        kube_apiserver_endpoint = 'kubeserver.localdomain:8443' if USE_MINIKUBE else 'kubernetes.default.svc:443'
+        kube_apiserver_endpoint = 'kubeserver.localdomain:8443' if USE_MINIKUBE else 'kubeserver.localdomain:6443'
     if not kube_apiserver_endpoint.startswith('http://') and not kube_apiserver_endpoint.startswith('https://'):
         kube_apiserver_endpoint = f'https://{kube_apiserver_endpoint}'
 
@@ -2571,9 +2464,6 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     with open(private_file, 'w') as f:
         f.write(content)
 
-    # In --k8s mode, avoid node-local hostPath requirements for homes-volume.
-    _convert_homes_volume_to_nfs(private_file)
-
     print(f" Created private configuration: {private_file}")
     print(f" User management job template configured successfully")
 
@@ -2597,18 +2487,6 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
         f"-name 'user-management-job-template.private.yaml' "
         f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
-    )
-
-    # Enforce the selected Kubernetes API endpoint in copied templates as well,
-    # so stale files in the data volume do not keep old external hostnames.
-    endpoint_escaped = kube_apiserver_endpoint.replace('/', r'\/')
-    cmd(
-        f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
-        f"\\( -name 'user-management-job-template.yaml' -o -name 'user-management-job-template.private.yaml' \\) "
-        f"-exec sed -i 's#https://kubeserver\\.localdomain:6443#{endpoint_escaped}#g;"
-        f"s#kubeserver\\.localdomain:6443#{kube_apiserver_endpoint}#g;"
-        f"s#https://kubeserver\\.localdomain:8443#{endpoint_escaped}#g;"
-        f"s#kubeserver\\.localdomain:8443#{kube_apiserver_endpoint}#g' {{}} +"
     )
     
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
@@ -2733,7 +2611,7 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
 
         if not USE_MINIKUBE:
             volumes['datasets_path'] = '/pv/dataset-service/datasets'
-            volumes['persistent_homes_path'] = '/tmp/data/homes/users'
+            volumes['persistent_homes_path'] = '/pv/data/homes/users'
             volumes['persistent_shared_folder_path'] = '/pv/data/homes/shared-folder'
             print(" Updated DSWS volume paths for cluster deployment")
 
@@ -2770,12 +2648,12 @@ def configure_kube_apiserver_oidc(CONFIG):
         print(f"      1. Add --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE")
         print(f"      2. Add --oidc-client-id=kubernetes")
         print(f"      3. Add --oidc-username-claim=preferred_username")
-        print(f"      4. Add --oidc-username-prefix=oidc:")
+        print(f"      4. Add --oidc-username-prefix='oidc:'")
         print(f"      5. Add --oidc-groups-claim=groups")
-        print(f"      6. Add --oidc-groups-prefix=oidc:")
+        print(f"      6. Add --oidc-groups-prefix='oidc:'")
         print(f"    For kubeadm: edit /etc/kubernetes/manifests/kube-apiserver.yaml")
         print(f"    For managed K8s: use cloud provider's OIDC configuration API")
-        return
+        return True
 
     print(f"\n{'='*80}")
     print(" Configuring kube-apiserver with OIDC")
@@ -2828,21 +2706,18 @@ fi
         cmd("minikube ssh -- 'sudo bash /tmp/patch_token_auth.sh'")
         print(" kube-apiserver patched with --token-auth-file")
 
-    # OIDC configuration flags
-    oidc_flags = [
-        f'--oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE',
-        '--oidc-client-id=kubernetes',
-        '--oidc-username-claim=preferred_username',
-        "'--oidc-username-prefix=oidc:'",
-        '--oidc-groups-claim=groups',
-        "'--oidc-groups-prefix=oidc:'"
-    ]
+    # Try to reach the issuer first, but do not block the patch.
+    # The flags still need to be written so the apiserver can be reconciled once Keycloak comes up.
+    if not oidc_issuer_is_reachable(CONFIG.public_domain):
+        print(" Proceeding with OIDC flag injection anyway")
 
     # Check if OIDC is already configured
     print(" Checking current kube-apiserver configuration...")
     check_oidc = cmd_output(
         "minikube ssh -- 'if sudo grep -q -- --oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml; then echo FOUND; else echo NOT_FOUND; fi'"
     ).strip()
+
+    print(f" Configuring kube-apiserver with OIDC for domain: {CONFIG.public_domain}")
 
     if check_oidc == 'FOUND':
         current_domain = cmd_output(
@@ -2851,100 +2726,173 @@ fi
 
         if CONFIG.public_domain in current_domain:
             print(f" kube-apiserver already configured with OIDC for {CONFIG.public_domain}")
-            return
+            if wait_for_kube_apiserver(max_wait=90, interval=5, context="with existing OIDC config"):
+                return True
+            print(" Existing OIDC config detected but kube-apiserver is unhealthy")
+            if rollback_kube_apiserver_oidc_flags():
+                print(" OIDC flags were rolled back to recover kube-apiserver")
+                return False
+            raise RuntimeError("kube-apiserver unhealthy and OIDC rollback failed")
         else:
             print(f" Updating kube-apiserver OIDC configuration to use {CONFIG.public_domain}")
 
-    print(f" Configuring kube-apiserver with OIDC for domain: {CONFIG.public_domain}")
-
-    # Create a bash script to modify the YAML in-place. This keeps the edit
-    # idempotent and avoids the fragile quoting issues from the previous awk version.
+    # Create a bash script to modify the YAML in-place.
+    # IMPORTANT: K8s 1.33+ may have --authentication-config in the manifest.
+    # If present, --oidc-* flags are mutually exclusive and will crash the apiserver.
+    # In that case we generate an AuthenticationConfiguration file instead.
     modify_script = f'''#!/bin/bash
 set -euo pipefail
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
-BACKUP_YAML="${{APISERVER_YAML}}.oidc-backup"
 TMP_YAML="$(mktemp)"
-trap 'rm -f "$TMP_YAML"' EXIT
+RESULT_YAML="$(mktemp)"
+trap 'rm -f "$TMP_YAML" "$RESULT_YAML"' EXIT
 
 if [ ! -f "$APISERVER_YAML" ]; then
     echo "Missing kube-apiserver manifest: $APISERVER_YAML" >&2
     exit 1
 fi
 
-# Preserve the original manifest so we can restore it if the apiserver fails to come back.
-cp -f "$APISERVER_YAML" "$BACKUP_YAML"
+# Check if --authentication-config is already in the manifest (K8s 1.33+).
+# If so, --oidc-* flags are mutually exclusive and MUST NOT be added.
+if grep -q -- '--authentication-config' "$APISERVER_YAML"; then
+    echo "DETECTED_AUTH_CONFIG"
+    exit 0
+fi
 
-# Remove any existing OIDC flags first.
-grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "$TMP_YAML"
+# Remove any existing OIDC flags first (|| true: grep -v exits 1 if no lines remain).
+grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "$TMP_YAML" || true
 
 # Insert the required flags immediately after the TLS key-file entry.
-awk -v issuer="https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE" '
+# Write to a temp file first, then move atomically to avoid truncation on failure.
+awk '
 BEGIN {{ found=0 }}
-{{
+/--tls-private-key-file/ {{
     print
-    if ($0 ~ /--tls-private-key-file/) {{
-        print "    - --oidc-issuer-url=" issuer
+        print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
         print "    - --oidc-client-id=kubernetes"
         print "    - --oidc-username-claim=preferred_username"
-        print "    - --oidc-username-prefix=oidc:"
+        print "    - \\"--oidc-username-prefix=oidc:\\""
         print "    - --oidc-groups-claim=groups"
-        print "    - --oidc-groups-prefix=oidc:"
-        found=1
-    }}
+        print "    - \\"--oidc-groups-prefix=oidc:\\""
+    found=1
+    next
 }}
+{{ print }}
 END {{
     if (!found) {{
         print "ERROR: --tls-private-key-file not found in kube-apiserver manifest" > "/dev/stderr"
         exit 1
     }}
 }}
-' "$TMP_YAML" > "$APISERVER_YAML"
+' "$TMP_YAML" > "$RESULT_YAML"
 
-echo "OIDC configuration applied successfully"
+# Only overwrite the manifest if awk succeeded (RESULT_YAML is non-empty).
+if [ -s "$RESULT_YAML" ]; then
+    cp "$RESULT_YAML" "$APISERVER_YAML"
+    echo "OIDC flags (--oidc-*) applied successfully"
+else
+    echo "ERROR: awk produced empty output, manifest NOT modified" >&2
+    exit 1
+fi
 '''
 
     # Write script to temp file
     with open('/tmp/modify_apiserver.sh', 'w') as f:
         f.write(modify_script)
 
+    # Backup apiserver manifest so we can rollback if OIDC flags prevent startup.
+    cmd("minikube ssh -- 'sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/kube-apiserver.yaml.pre-oidc.bak'", exit_on_error=False)
+
     # Copy script to minikube
     cmd("minikube cp /tmp/modify_apiserver.sh minikube:/tmp/modify_apiserver.sh")
 
-    # Run the script by piping it to bash (avoids permission issues with /tmp)
+    # Run the script and capture output to detect --authentication-config presence.
     print(" Modifying kube-apiserver.yaml...")
-    cmd("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
+    script_output = cmd_output("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
 
-    # Wait for apiserver to restart (it monitors the manifest file)
-    print(" Waiting for kube-apiserver to restart with new configuration...")
-    print("  (This may take 30-60 seconds)")
-    time.sleep(10)
+    if "DETECTED_AUTH_CONFIG" in script_output:
+        # K8s 1.33+ with --authentication-config already present.
+        # --oidc-* flags are mutually exclusive; use structured auth config file instead.
+        print(" Detected --authentication-config in kube-apiserver manifest (K8s 1.33+).")
+        print(" Using AuthenticationConfiguration file instead of --oidc-* flags...")
+        _configure_oidc_via_authentication_config(CONFIG)
+    else:
+        # Used --oidc-* flags; wait for apiserver restart.
+        if not wait_for_kube_apiserver(max_wait=300, interval=5, context="after OIDC patch"):
+            print(" OIDC patch appears to have broken kube-apiserver startup. Rolling back manifest...")
+            if rollback_kube_apiserver_oidc_flags():
+                print(" OIDC configuration was rolled back because kube-apiserver did not recover")
+                return False
+            raise RuntimeError("kube-apiserver did not recover after OIDC rollback")
 
-    # Wait for apiserver to be ready
-    max_wait = 180
-    waited = 0
-    while waited < max_wait:
-        result = cmd("minikube kubectl -- get --raw=/healthz 2>/dev/null", exit_on_error=False)
-        if result == 0:
-            print(f" kube-apiserver is ready with OIDC configuration")
-            break
-        time.sleep(5)
-        waited += 5
-        if waited % 15 == 0:
-            print(f"   Still waiting for apiserver... ({waited}s)")
-
-    if waited >= max_wait:
-        print(f"  ERROR: kube-apiserver did not become ready after OIDC patching")
-        print(f"   Rolling back the OIDC manifest change to restore the API server before continuing.")
-        cmd("minikube ssh -- 'sudo cp -f /etc/kubernetes/manifests/kube-apiserver.yaml.oidc-backup /etc/kubernetes/manifests/kube-apiserver.yaml'")
-        print(f"   Restored kube-apiserver manifest from backup. Continuing without OIDC patch for now.")
-        return
-
-    # Verify OIDC configuration
-    print("\n Verifying OIDC configuration...")
-    cmd("minikube ssh -- 'sudo grep oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml'")
+        # Verify OIDC configuration
+        print("\n Verifying OIDC configuration...")
+        cmd("minikube ssh -- 'sudo grep oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml'")
 
     print(f"\n kube-apiserver configured successfully with OIDC!")
+    return True
+
+
+def _configure_oidc_via_authentication_config(CONFIG):
+    """Configure OIDC via --authentication-config file (K8s 1.33+ compatible)."""
+    issuer_url = f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
+
+    auth_config_yaml = f"""apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+- issuer:
+    url: {issuer_url}
+  claimMappings:
+    username:
+      claim: preferred_username
+      prefix: "oidc:"
+    groups:
+      claim: groups
+      prefix: "oidc:"
+  audiences:
+  - kubernetes
+"""
+    with open('/tmp/auth-config.yaml', 'w') as f:
+        f.write(auth_config_yaml)
+    print(f" Generated AuthenticationConfiguration at /tmp/auth-config.yaml")
+
+    cmd("minikube cp /tmp/auth-config.yaml minikube:/tmp/auth-config.yaml")
+
+    # Backup apiserver manifest before modifying
+    cmd("minikube ssh -- 'sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/kube-apiserver.yaml.pre-auth-config.bak'", exit_on_error=False)
+
+    # Add --authentication-config flag to the manifest.
+    # If --oidc-* flags exist, remove them first (they conflict).
+    patch_script = r"""#!/bin/bash
+set -euo pipefail
+APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
+# Remove any legacy --oidc-* flags (conflict with --authentication-config).
+grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "${APISERVER_YAML}.tmp" || true
+mv "${APISERVER_YAML}.tmp" "$APISERVER_YAML"
+# Add --authentication-config if not already present.
+if ! grep -q -- '--authentication-config' "$APISERVER_YAML"; then
+    sed -i '/--tls-private-key-file/a\    - --authentication-config=/tmp/auth-config.yaml' "$APISERVER_YAML"
+    echo "--authentication-config added"
+else
+    echo "--authentication-config already present"
+fi
+"""
+    with open('/tmp/patch_auth_config.sh', 'w') as f:
+        f.write(patch_script)
+    cmd("minikube cp /tmp/patch_auth_config.sh minikube:/tmp/patch_auth_config.sh")
+    cmd("minikube ssh -- 'sudo bash /tmp/patch_auth_config.sh'")
+
+    if not wait_for_kube_apiserver(max_wait=300, interval=5, context="after --authentication-config patch"):
+        print(" Authentication-config patch appears to have broken kube-apiserver. Rolling back...")
+        cmd("minikube ssh -- 'if [ -f /tmp/kube-apiserver.yaml.pre-auth-config.bak ]; then sudo cp /tmp/kube-apiserver.yaml.pre-auth-config.bak /etc/kubernetes/manifests/kube-apiserver.yaml; fi'", exit_on_error=False)
+        if wait_for_kube_apiserver(max_wait=240, interval=5, context="after auth-config rollback"):
+            print(" Rolled back to original kube-apiserver manifest")
+            return False
+        raise RuntimeError("kube-apiserver did not recover after auth-config rollback")
+
+    print("\n Verifying authentication-config...")
+    cmd("minikube ssh -- 'sudo grep authentication-config /etc/kubernetes/manifests/kube-apiserver.yaml'")
 
 def install_kubeapps(CONFIG, client_kubernetes_secret: str):
     '''Install Kubeapps dashboard for managing Helm charts'''
@@ -4580,7 +4528,7 @@ def apply_pod_priorities():
 
     print(f" Pod priority classes applied successfully")
 
-def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
+def install_orthanc(CONFIG):
     '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
     print(f"\n{'='*80}")
     print(" Installing Orthanc PACS Server")
@@ -4597,7 +4545,7 @@ def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
 
         # Create all host directories for PVs
         print(" Creating host directories for PVs...")
-        for subdir in ["orthanc-storage", "orthanc-db", "keycloak-db", "orthanc-wrapper"]:
+        for subdir in ["orthanc-storage", "orthanc-db", "keycloak-db", "wrapper"]:
             cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/{subdir}'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
         # Populate orthanc-wrapper payload from fixed tar file in repo.
@@ -4610,17 +4558,12 @@ def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
             wrapper_source_dir = os.path.join(orthanc_dir, "orthanc-wrapper")
         if USE_MINIKUBE:
             wrapper_host_dir = "/var/hostpath-provisioner/orthanc/orthanc-wrapper"
-            legacy_wrapper_host_dir = "/var/hostpath-provisioner/orthanc/wrapper"
         else:
             _nfs_server, _nfs_base = _nfs_server_base()
             if _nfs_base:
                 wrapper_host_dir = os.path.join(_nfs_base, "orthanc", "orthanc-wrapper")
             else:
                 wrapper_host_dir = os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
-            legacy_wrapper_host_dir = os.path.join(os.path.dirname(wrapper_host_dir), "wrapper")
-
-        if os.path.isdir(legacy_wrapper_host_dir) and not os.path.isdir(wrapper_host_dir):
-            wrapper_host_dir = legacy_wrapper_host_dir
 
         wrapper_payload_available = False
 
@@ -4628,37 +4571,49 @@ def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
             wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
             if os.path.isfile(wrapper_repo_tar):
                 print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
-                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
+                # Build a merged seed on the HOST: extract the repo tar, overlay
+                # the wrapper source files (app.json, init_node.sh, ...), then
+                # re-tar. The VM cannot see host-local paths (wrapper_source_dir)
+                # inside `minikube ssh`, so the merge must happen before pushing.
+                seed_dir = "/tmp/orthanc-wrapper-seed"
+                shutil.rmtree(seed_dir, ignore_errors=True)
+                os.makedirs(seed_dir, exist_ok=True)
+                print(" Extracting orthanc-wrapper tar for merge...")
+                cmd(f"tar -xzf {shlex.quote(wrapper_repo_tar)} -C {shlex.quote(seed_dir)}")
+                seed_src = seed_dir
+                wrapper_sub = os.path.join(seed_dir, "wrapper")
+                if os.path.isdir(wrapper_sub) and os.listdir(wrapper_sub):
+                    seed_src = wrapper_sub
+                if os.path.isdir(wrapper_source_dir):
+                    src_abs = os.path.abspath(wrapper_source_dir)
+                    dst_abs = os.path.abspath(seed_src)
+                    if src_abs != dst_abs:
+                        print(f" Overlaying wrapper source files from {wrapper_source_dir} into seed...")
+                        cmd(f"cp -a {shlex.quote(src_abs)}/. {shlex.quote(dst_abs)}/")
+                    overlay_tar = os.path.join(dst_abs, "orthanc-wrapper.tar.gz")
+                    if os.path.isfile(overlay_tar) and os.path.abspath(overlay_tar) != os.path.abspath(wrapper_repo_tar):
+                        os.remove(overlay_tar)
+                merged_tar = "/tmp/orthanc-wrapper-merged.tar.gz"
+                cmd(
+                    f"tar -czf {shlex.quote(merged_tar)} "
+                    f"-C {shlex.quote(os.path.dirname(seed_src))} {shlex.quote(os.path.basename(seed_src))}"
+                )
+                cmd(f"minikube cp {shlex.quote(merged_tar)} minikube:{wrapper_tar}")
                 cmd(
                     "minikube ssh -- '"
                     "set -e; "
                     "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
-                    "TMP=/tmp/orthanc-wrapper-seed-unpack; "
-                    "REPO_SRC=" + shlex.quote(wrapper_source_dir) + "; "
                     "sudo mkdir -p $TARGET; "
-                    "sudo rm -rf $TMP; "
-                    "sudo mkdir -p $TMP; "
-                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
-                    "if [ -d \"$TMP/wrapper\" ] && [ -n \"$(find $TMP/wrapper -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
-                    "  SRC=$TMP/wrapper; "
-                    "elif [ -f $TMP/init_node.sh ] || [ -f $TMP/app.json ] || [ -f $TMP/restart_node_server.sh ] || [ -f $TMP/update_app.sh ]; then "
-                    "  SRC=$TMP; "
-                    "elif [ -d \"$TMP/bundle\" ] && [ -n \"$(find $TMP/bundle -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
-                    "  SRC=$TMP; "
-                    "else "
-                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f \\( -name init_node.sh -o -name app.json -o -name restart_node_server.sh -o -name update_app.sh \\) | head -n1); "
-                    "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
-                    "fi; "
                     "sudo rm -rf $TARGET/*; "
-                    "sudo cp -a $SRC/. $TARGET/; "
-                    "if [ -d \"$REPO_SRC\" ]; then sudo cp -a \"$REPO_SRC\"/. \"$TARGET\"/; fi; "
+                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TARGET --strip-components=1; "
                     "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
                     "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
                     "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
                     "sudo chmod -R 755 $TARGET'"
                 )
-                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
-                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
+                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz /tmp/orthanc-wrapper-merged.tar.gz", exit_on_error=False)
+                shutil.rmtree(seed_dir, ignore_errors=True)
+                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz'", exit_on_error=False)
             else:
                 print(
                     "  Warning: orthanc-wrapper payload not found. "
@@ -4820,7 +4775,7 @@ def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
             db_keycloak_password_q = shlex.quote(oc.db_keycloak_password or '')
             kc_admin_user_q = shlex.quote(oc.kc_admin_user or '')
             kc_admin_password_q = shlex.quote(oc.kc_admin_password or '')
-            kc_client_secret_q = shlex.quote(auth_client_secrets.CLIENT_ORTHANC_SECRET)
+            kc_client_secret_q = shlex.quote(oc.kc_client_secret or '')
             svc_user_q = shlex.quote(svc_user)
             svc_pw_q = shlex.quote(svc_pw)
             users_json_q = shlex.quote(users_json)
@@ -4851,7 +4806,11 @@ def install_orthanc(CONFIG, auth_client_secrets: Auth_client_secrets):
                 _cm_content = _f.read()
             _cm_content = _cm_content.replace("YOURDOMAIN", CONFIG.public_domain)
             _cm_content = _cm_content.replace("ORTHANC_NODE_NAME", CONFIG.orthanc.node_name)
-            _cm_content = _cm_content.replace("ORTHANC_KEYCLOAK_CLIENT_ID", "orthanc")
+
+            _orthanc_client_id = 'orthanc'
+            if oc and getattr(oc, 'kc_client_id', None):
+                _orthanc_client_id = oc.kc_client_id
+            _cm_content = _cm_content.replace("ORTHANC_KEYCLOAK_CLIENT_ID", _orthanc_client_id)
             with open("orthanc-cm.private.yaml", 'w') as _f:
                 _f.write(_cm_content)
             cmd("minikube kubectl -- apply -f orthanc-cm.private.yaml")
@@ -5302,7 +5261,13 @@ def install(flavor):
     install_keycloak(auth_client_secrets)
 
     # Configure kube-apiserver with OIDC - done AFTER Keycloak so the OIDC issuer URL is reachable
-    configure_kube_apiserver_oidc(CONFIG)
+    try:
+        oidc_applied = configure_kube_apiserver_oidc(CONFIG)
+    except Exception as e:
+        oidc_applied = False
+        print(f"  Warning: kube-apiserver OIDC configuration failed: {e}")
+    if not oidc_applied:
+        print("  Continuing without OIDC on kube-apiserver (configuration was skipped or rolled back)")
 
     # Clinical Data SQL DB is installed in all flavors
     install_clinical_data_sql_db()
@@ -5322,7 +5287,7 @@ def install(flavor):
 
     # Orthanc PACS server is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
-        install_orthanc(CONFIG, auth_client_secrets)
+        install_orthanc(CONFIG)
 
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "mini", "standard"]:
