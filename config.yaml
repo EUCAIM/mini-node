@@ -79,6 +79,11 @@ focus:
     # API key for the focus application (from beam broker registration)
   dataset_service_auth_header: "changeme"
     # Authorization header value for dataset-service API calls (Base64 encoded credentials)
+  eucaim_search_token: ""
+    # Shared API token used BOTH by the dataset-service (self.eucaim_search_token) and by
+    # fed-search (sent as header 'Secret <token>' in the api-keys secret). The installer
+    # injects this same value into both deployments. If empty, a token is generated once
+    # and persisted so that both sides always use the SAME value.
   beam_broker_url: "https://broker.eucaim.cancerimage.eu"
     # URL of the EUCAIM beam broker
   root_crt_pem: |
