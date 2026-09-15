@@ -1543,62 +1543,6 @@
       ]
     },
     {
-      "id": "2b8fbf9c-9af8-4a88-b385-dd2745849009",
-      "clientId": "orthanc",
-      "name": "",
-      "description": "",
-      "rootUrl": "https://{{ PUBLIC_DOMAIN }}/orthanc",
-      "adminUrl": "https://{{ PUBLIC_DOMAIN }}/orthanc",
-      "baseUrl": "https://{{ PUBLIC_DOMAIN }}/orthanc",
-      "surrogateAuthRequired": false,
-      "enabled": true,
-      "alwaysDisplayInConsole": false,
-      "clientAuthenticatorType": "client-secret",
-      "secret": "{{ CLIENT_ORTHANC_SECRET }}",
-      "redirectUris": [
-        "https://{{ PUBLIC_DOMAIN }}/orthanc/*"
-      ],
-      "webOrigins": [
-        "https://{{ PUBLIC_DOMAIN }}"
-      ],
-      "notBefore": 0,
-      "bearerOnly": false,
-      "consentRequired": false,
-      "standardFlowEnabled": true,
-      "implicitFlowEnabled": false,
-      "directAccessGrantsEnabled": false,
-      "serviceAccountsEnabled": false,
-      "publicClient": false,
-      "frontchannelLogout": true,
-      "protocol": "openid-connect",
-      "attributes": {
-        "realm_client": "false",
-        "oidc.ciba.grant.enabled": "false",
-        "client.secret.creation.time": "1738759588",
-        "backchannel.logout.session.required": "true",
-        "oauth2.device.authorization.grant.enabled": "false",
-        "display.on.consent.screen": "false",
-        "backchannel.logout.revoke.offline.tokens": "false"
-      },
-      "authenticationFlowBindingOverrides": {},
-      "fullScopeAllowed": false,
-      "nodeReRegistrationTimeout": -1,
-      "defaultClientScopes": [
-        "web-origins",
-        "acr",
-        "roles",
-        "profile",
-        "basic",
-        "email"
-      ],
-      "optionalClientScopes": [
-        "address",
-        "phone",
-        "offline_access",
-        "microprofile-jwt"
-      ]
-    },
-    {
       "id": "49c27015-2a34-4a72-802f-c7f9b14143fe",
       "clientId": "jobman-service",
       "name": "",
@@ -2787,7 +2731,7 @@
       "displayName": "LifeScienceRI",
       "internalId": "c984919e-1cfd-4571-8252-d50328894f37",
       "providerId": "oidc",
-      "enabled": "{{ IDP_LSRI_ENABLED }}",
+      "enabled": {{ IDP_LSRI_ENABLED }},
       "updateProfileFirstLoginMode": "on",
       "trustEmail": true,
       "storeToken": true,
