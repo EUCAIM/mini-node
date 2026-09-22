@@ -31,7 +31,7 @@
           }
       ],
       "defaultImage": {
-        "fullUrl": "harbor.chaimeleon-eu.i3m.upv.es:5000/chaimeleon-library-batch/ubuntu-python:latest",
+        "fullUrl": "ubuntu-python:latest",
         "imagePullSecrets": null
       },
       "userConfigmap": "chaimeleon",
