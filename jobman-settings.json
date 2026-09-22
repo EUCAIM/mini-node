@@ -31,7 +31,7 @@
           }
       ],
       "defaultImage": {
-        "fullUrl": "ubuntu-python:latest",
+        "fullUrl": "harbor.eucaim-node.i3m.upv.es/library-batch-public/ubuntu-python:latest",
         "imagePullSecrets": null
       },
       "userConfigmap": "chaimeleon",
