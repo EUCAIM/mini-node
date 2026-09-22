@@ -619,6 +619,7 @@ class Auth_client_secrets():
         self.CLIENT_JOBMAN_SERVICE_SECRET = existing_secrets.get('jobman-service', generate_random_password(32))
         self.CLIENT_KUBERNETES_SECRET = existing_secrets.get('kubernetes', generate_random_password(32))
         self.CLIENT_KUBERNETES_OPERATOR_SECRET = existing_secrets.get('kubernetes-operator', generate_random_password(32))
+        self.CLIENT_DESKTOPS_CLEANER_SECRET = existing_secrets.get('desktops-cleaner', generate_random_password(32))
 
         if existing_secrets:
             print(f" Reusing existing client secrets to maintain consistency")
@@ -968,6 +969,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
                 l = l.replace("{{ CLIENT_JOBMAN_SERVICE_SECRET }}", auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
+                l = l.replace("{{ CLIENT_DESKTOPS_CLEANER_SECRET }}", auth_client_secrets.CLIENT_DESKTOPS_CLEANER_SECRET)
                 fout.write(l)
 
     # Keep a copy in the repository root so next installer runs can reuse the same client secrets.

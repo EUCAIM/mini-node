@@ -96,6 +96,9 @@
         "composite": true,
         "composites": {
           "client": {
+            "orthanc": [
+              "admin"
+            ],
             "dataset-service": [
               "admin_users",
               "admin_datasets",
@@ -201,6 +204,71 @@
     ],
     "client": {
       "kubernetes": [],
+      "fem-client": [],
+      "guacamole": [],
+      "security-admin-console": [],
+      "account-console": [],
+      "admin-permissions": [],
+      "dataset-explorer": [],
+      "kubernetes-operator": [],
+      "admin-cli": [],
+      "dataset-service": [
+        {
+          "id": "1522dddd-c499-4276-92e9-38bfcac3a6b5",
+          "name": "admin_users",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
+          "attributes": {}
+        },
+        {
+          "id": "6e00d3ab-2545-4206-a857-f465c9d20b17",
+          "name": "use_datasets",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
+          "attributes": {}
+        },
+        {
+          "id": "95c35bdc-2c0e-409c-b093-b2c76a7e1d41",
+          "name": "admin_datasetAccess",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
+          "attributes": {}
+        },
+        {
+          "id": "10b1bc2b-11bf-4e56-b165-eb3e5027b411",
+          "name": "admin_datasets",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
+          "attributes": {}
+        },
+        {
+          "id": "4e5a0855-4611-43c3-ac32-4bddf6010d74",
+          "name": "admin_projects",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
+          "attributes": {}
+        },
+        {
+          "id": "d6c49f27-46f8-49cd-84de-ccf2d569264d",
+          "name": "superadmin_datasets",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
+          "attributes": {}
+        }
+      ],
+      "desktops-cleaner": [],
       "realm-management": [
         {
           "id": "bc8c8409-e52f-468c-9803-766dba5506a1",
@@ -413,10 +481,6 @@
           "attributes": {}
         }
       ],
-      "fem-client": [],
-      "guacamole": [],
-      "security-admin-console": [],
-      "account-console": [],
       "broker": [
         {
           "id": "a035d1f3-323f-499d-beaa-20069aeba4ba",
@@ -428,10 +492,35 @@
           "attributes": {}
         }
       ],
-      "admin-permissions": [],
-      "dataset-explorer": [],
-      "kubernetes-operator": [],
-      "admin-cli": [],
+      "orthanc": [
+        {
+          "id": "bca5be5d-c984-449a-b58b-a31806ac56fe",
+          "name": "admin",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "ec843f28-1365-4160-b634-15b79baa53fe",
+          "attributes": {}
+        },
+        {
+          "id": "2fc29266-c82a-449e-824d-3687d8169059",
+          "name": "dataset-manager",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "ec843f28-1365-4160-b634-15b79baa53fe",
+          "attributes": {}
+        },
+        {
+          "id": "03a1abdd-441f-4643-9bb8-63c63985b7ac",
+          "name": "auditor",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "ec843f28-1365-4160-b634-15b79baa53fe",
+          "attributes": {}
+        }
+      ],
       "account": [
         {
           "id": "f0c5cfc4-fbbd-4d07-93cc-83bb72261e02",
@@ -517,62 +606,6 @@
           },
           "clientRole": true,
           "containerId": "3c5b3f0f-e9f8-400a-91f3-ce519bdc13ea",
-          "attributes": {}
-        }
-      ],
-      "dataset-service": [
-        {
-          "id": "1522dddd-c499-4276-92e9-38bfcac3a6b5",
-          "name": "admin_users",
-          "description": "",
-          "composite": false,
-          "clientRole": true,
-          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
-          "attributes": {}
-        },
-        {
-          "id": "6e00d3ab-2545-4206-a857-f465c9d20b17",
-          "name": "use_datasets",
-          "description": "",
-          "composite": false,
-          "clientRole": true,
-          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
-          "attributes": {}
-        },
-        {
-          "id": "95c35bdc-2c0e-409c-b093-b2c76a7e1d41",
-          "name": "admin_datasetAccess",
-          "description": "",
-          "composite": false,
-          "clientRole": true,
-          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
-          "attributes": {}
-        },
-        {
-          "id": "10b1bc2b-11bf-4e56-b165-eb3e5027b411",
-          "name": "admin_datasets",
-          "description": "",
-          "composite": false,
-          "clientRole": true,
-          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
-          "attributes": {}
-        },
-        {
-          "id": "4e5a0855-4611-43c3-ac32-4bddf6010d74",
-          "name": "admin_projects",
-          "description": "",
-          "composite": false,
-          "clientRole": true,
-          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
-          "attributes": {}
-        },
-        {
-          "id": "d6c49f27-46f8-49cd-84de-ccf2d569264d",
-          "name": "superadmin_datasets",
-          "description": "",
-          "composite": false,
-          "clientRole": true,
-          "containerId": "f63753ef-55b3-4e40-b26d-16f992269de1",
           "attributes": {}
         }
       ],
@@ -767,6 +800,31 @@
       "groups": []
     },
     {
+      "id": "c7f4ddc0-ba50-4aa3-ae47-3946efe1a38f",
+      "username": "service-account-desktops-cleaner",
+      "emailVerified": false,
+      "createdTimestamp": 1774435554729,
+      "enabled": true,
+      "totp": false,
+      "serviceAccountClientId": "desktops-cleaner",
+      "disableableCredentialTypes": [],
+      "requiredActions": [
+        "TERMS_AND_CONDITIONS",
+        "USER_VALIDATED"
+      ],
+      "realmRoles": [
+        "default-roles-eucaim-node"
+      ],
+      "clientRoles": {
+        "realm-management": [
+          "query-users",
+          "view-users"
+        ]
+      },
+      "notBefore": 0,
+      "groups": []
+    },
+    {
       "id": "e2c000b4-521b-4e89-a6a7-89891b2a342c",
       "username": "service-account-jobman-service",
       "emailVerified": false,
@@ -836,6 +894,13 @@
         ]
       },
       {
+        "client": "desktops-cleaner",
+        "roles": [
+          "view-users",
+          "query-users"
+        ]
+      },
+      {
         "client": "jobman-service",
         "roles": [
           "view-users",
@@ -854,6 +919,12 @@
           "use_datasets",
           "admin_projects"
         ]
+      },
+      {
+        "client": "orthanc",
+        "roles": [
+          "admin_datasets"
+        ]
       }
     ],
     "account": [
@@ -862,6 +933,14 @@
         "roles": [
           "manage-account",
           "view-groups"
+        ]
+      }
+    ],
+    "jobman-service": [
+      {
+        "client": "fem-client",
+        "roles": [
+          "manage-own-jobs"
         ]
       }
     ]
@@ -1267,13 +1346,27 @@
       "frontchannelLogout": false,
       "protocol": "openid-connect",
       "attributes": {
-        "realm_client": "false",
-        "oidc.ciba.grant.enabled": "false",
-        "backchannel.logout.session.required": "true",
+        "request.object.signature.alg": "any",
+        "request.object.encryption.alg": "any",
+        "client.introspection.response.allow.jwt.claim.enabled": "false",
+        "standard.token.exchange.enabled": "false",
         "post.logout.redirect.uris": "+",
         "oauth2.device.authorization.grant.enabled": "false",
+        "backchannel.logout.revoke.offline.tokens": "false",
+        "use.refresh.tokens": "true",
+        "realm_client": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "client.use.lightweight.access.token.enabled": "false",
+        "backchannel.logout.session.required": "true",
+        "request.object.required": "not required",
+        "client_credentials.use_refresh_token": "false",
+        "access.token.header.type.rfc9068": "false",
+        "tls.client.certificate.bound.access.tokens": "false",
+        "require.pushed.authorization.requests": "false",
+        "acr.loa.map": "{}",
         "display.on.consent.screen": "false",
-        "backchannel.logout.revoke.offline.tokens": "false"
+        "request.object.encryption.enc": "any",
+        "token.response.type.bearer.lower-case": "false"
       },
       "authenticationFlowBindingOverrides": {},
       "fullScopeAllowed": false,
@@ -1404,6 +1497,63 @@
         "roles",
         "profile",
         "groups",
+        "basic",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ]
+    },
+    {
+      "id": "6a346586-d8c9-420b-a5c3-040f3ee3798f",
+      "clientId": "desktops-cleaner",
+      "name": "",
+      "description": "It is used only to access the admin API to get email address of users.",
+      "rootUrl": "",
+      "adminUrl": "",
+      "baseUrl": "",
+      "surrogateAuthRequired": false,
+      "enabled": true,
+      "alwaysDisplayInConsole": false,
+      "clientAuthenticatorType": "client-secret",
+      "secret": "{{ CLIENT_DESKTOPS_CLEANER_SECRET }}",
+      "redirectUris": [
+        "/*"
+      ],
+      "webOrigins": [
+        "/*"
+      ],
+      "notBefore": 0,
+      "bearerOnly": false,
+      "consentRequired": false,
+      "standardFlowEnabled": false,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": true,
+      "publicClient": false,
+      "frontchannelLogout": true,
+      "protocol": "openid-connect",
+      "attributes": {
+        "realm_client": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "client.secret.creation.time": "1774435554",
+        "backchannel.logout.session.required": "true",
+        "standard.token.exchange.enabled": "false",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "backchannel.logout.revoke.offline.tokens": "false"
+      },
+      "authenticationFlowBindingOverrides": {},
+      "fullScopeAllowed": false,
+      "nodeReRegistrationTimeout": -1,
+      "defaultClientScopes": [
+        "service_account",
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
         "basic",
         "email"
       ],
@@ -1806,6 +1956,115 @@
       ]
     },
     {
+      "id": "ec843f28-1365-4160-b634-15b79baa53fe",
+      "clientId": "orthanc",
+      "name": "",
+      "description": "",
+      "rootUrl": "https://{{ PUBLIC_DOMAIN }}/orthanc",
+      "adminUrl": "https://{{ PUBLIC_DOMAIN }}/orthanc/",
+      "baseUrl": "/",
+      "surrogateAuthRequired": false,
+      "enabled": true,
+      "alwaysDisplayInConsole": false,
+      "clientAuthenticatorType": "client-secret",
+      "redirectUris": [
+        "https://{{ PUBLIC_DOMAIN }}/wrapper/*",
+        "https://{{ PUBLIC_DOMAIN }}/orthanc/*"
+      ],
+      "webOrigins": [
+        "https://{{ PUBLIC_DOMAIN }}"
+      ],
+      "notBefore": 0,
+      "bearerOnly": false,
+      "consentRequired": false,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "serviceAccountsEnabled": false,
+      "publicClient": true,
+      "frontchannelLogout": true,
+      "protocol": "openid-connect",
+      "attributes": {
+        "realm_client": "false",
+        "oidc.ciba.grant.enabled": "false",
+        "client.secret.creation.time": "1788972024",
+        "backchannel.logout.session.required": "true",
+        "standard.token.exchange.enabled": "false",
+        "post.logout.redirect.uris": "+",
+        "frontchannel.logout.session.required": "true",
+        "oauth2.device.authorization.grant.enabled": "false",
+        "display.on.consent.screen": "false",
+        "backchannel.logout.revoke.offline.tokens": "false"
+      },
+      "authenticationFlowBindingOverrides": {},
+      "fullScopeAllowed": false,
+      "nodeReRegistrationTimeout": -1,
+      "protocolMappers": [
+        {
+          "id": "447019eb-cd3c-41fa-81b1-b4f3bf5db1fe",
+          "name": "client roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-client-role-mapper",
+          "consentRequired": false,
+          "config": {
+            "introspection.token.claim": "true",
+            "multivalued": "true",
+            "userinfo.token.claim": "false",
+            "user.attribute": "foo",
+            "id.token.claim": "false",
+            "lightweight.claim": "false",
+            "access.token.claim": "true",
+            "claim.name": "realm_access.roles",
+            "jsonType.label": "String",
+            "usermodel.clientRoleMapping.clientId": "orthanc"
+          }
+        },
+        {
+          "id": "2d29f7fc-4714-46b6-8a7a-72e0e2bbbf8f",
+          "name": "aud dataset-service",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "dataset-service",
+            "id.token.claim": "false",
+            "lightweight.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        },
+        {
+          "id": "283c6ff7-bb08-4c1b-bb2a-c65fe37334c2",
+          "name": "aud account",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-audience-mapper",
+          "consentRequired": false,
+          "config": {
+            "included.client.audience": "account",
+            "id.token.claim": "false",
+            "lightweight.claim": "false",
+            "access.token.claim": "true",
+            "introspection.token.claim": "true"
+          }
+        }
+      ],
+      "defaultClientScopes": [
+        "web-origins",
+        "acr",
+        "roles",
+        "profile",
+        "groups",
+        "basic",
+        "email"
+      ],
+      "optionalClientScopes": [
+        "address",
+        "phone",
+        "offline_access",
+        "microprofile-jwt"
+      ]
+    },
+    {
       "id": "5ce04d6f-2464-43ad-8ae9-24e81c76e0a9",
       "clientId": "realm-management",
       "name": "${client_realm-management}",
@@ -1849,9 +2108,169 @@
       "authorizationSettings": {
         "allowRemoteResourceManagement": false,
         "policyEnforcementMode": "ENFORCING",
-        "resources": [],
-        "policies": [],
-        "scopes": [],
+        "resources": [
+          {
+            "name": "idp.resource.c984919e-1cfd-4571-8252-d50328894f37",
+            "type": "IdentityProvider",
+            "ownerManagedAccess": false,
+            "attributes": {},
+            "uris": [],
+            "scopes": [
+              {
+                "name": "token-exchange"
+              }
+            ]
+          },
+          {
+            "name": "client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "Client",
+            "ownerManagedAccess": false,
+            "attributes": {},
+            "uris": [],
+            "scopes": [
+              {
+                "name": "view"
+              },
+              {
+                "name": "map-roles-client-scope"
+              },
+              {
+                "name": "configure"
+              },
+              {
+                "name": "map-roles"
+              },
+              {
+                "name": "manage"
+              },
+              {
+                "name": "map-roles-composite"
+              },
+              {
+                "name": "token-exchange"
+              }
+            ]
+          }
+        ],
+        "policies": [
+          {
+            "name": "token-exchange-from-fem-client",
+            "description": "",
+            "type": "client",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "clients": "[\"fem-client\"]"
+            }
+          },
+          {
+            "name": "token-exchange.permission.idp.c984919e-1cfd-4571-8252-d50328894f37",
+            "description": "",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"idp.resource.c984919e-1cfd-4571-8252-d50328894f37\"]",
+              "scopes": "[\"token-exchange\"]",
+              "applyPolicies": "[\"token-exchange-from-fem-client\"]"
+            }
+          },
+          {
+            "name": "manage.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"manage\"]"
+            }
+          },
+          {
+            "name": "configure.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"configure\"]"
+            }
+          },
+          {
+            "name": "view.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"view\"]"
+            }
+          },
+          {
+            "name": "map-roles.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"map-roles\"]"
+            }
+          },
+          {
+            "name": "map-roles-client-scope.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"map-roles-client-scope\"]"
+            }
+          },
+          {
+            "name": "map-roles-composite.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"map-roles-composite\"]"
+            }
+          },
+          {
+            "name": "token-exchange.permission.client.49c27015-2a34-4a72-802f-c7f9b14143fe",
+            "description": "",
+            "type": "scope",
+            "logic": "POSITIVE",
+            "decisionStrategy": "UNANIMOUS",
+            "config": {
+              "resources": "[\"client.resource.49c27015-2a34-4a72-802f-c7f9b14143fe\"]",
+              "scopes": "[\"token-exchange\"]",
+              "applyPolicies": "[\"token-exchange-from-fem-client\"]"
+            }
+          }
+        ],
+        "scopes": [
+          {
+            "name": "token-exchange"
+          },
+          {
+            "name": "manage"
+          },
+          {
+            "name": "view"
+          },
+          {
+            "name": "map-roles"
+          },
+          {
+            "name": "map-roles-client-scope"
+          },
+          {
+            "name": "map-roles-composite"
+          },
+          {
+            "name": "configure"
+          }
+        ],
         "decisionStrategy": "UNANIMOUS"
       }
     },
@@ -2923,7 +3342,7 @@
         "subComponents": {},
         "config": {
           "kc.user.profile.config": [
-            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":\"3\",\"max\":\"24\",\"trim-disabled\":\"false\"},\"pattern\":{\"pattern\":\"^[0-9a-z][0-9a-z-]+[0-9a-z]$\",\"error-message\":\"The length must be 3-24 characters, and must contain only lowercase alphanumeric characters or '-'. Examples: james, james-upv, james31\"}},\"annotations\":{\"inputHelperTextBefore\":\"Your unique name in the platform. You will not be able to change it later and short is usually preferred.\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"companyOrOrganization\",\"displayName\":\"Company or organization\",\"validations\":{},\"annotations\":{},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"projects\",\"displayName\":\"Project (one or more) and working package (if applicable)\",\"validations\":{},\"annotations\":{\"inputTypePlaceholder\":\"Examples: Primage, Leopard, Eucaim WP6\",\"inputHelperTextAfter\":\"Your relation to the project will be checked (you can add anything you consider relevant on this in the section Z)\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"project-member\",\"multivalued\":false},{\"name\":\"requiredRoles\",\"displayName\":\"Required roles\",\"validations\":{\"options\":{\"options\":[\"authorized-technical-data-manager\",\"clinical-staff\",\"dataset-administrator\",\"data-scientists\",\"application-developer\"]}},\"annotations\":{\"inputOptionLabels\":{\"authorized-technical-data-manager\":\"[Data ingester]: Ingest (manually or in-bulk) new patient cases (images or clinical data)\",\"clinical-staff\":\"[Clinical staff]: Use or validate images, data or models in clinical environment\",\"dataset-administrator\":\"[Dataset manager]: Create and manage datasets\",\"data-scientists\":\"[Data scientist]: Run applications in the platform using datasets to develop and train AI models/tools\",\"application-developer\":\"[Application developer]: Develop applications for the platform\"},\"inputType\":\"multiselect-checkboxes\",\"inputHelperTextBefore\":\"What are you going to do in that projects?\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"project-member\",\"multivalued\":true},{\"name\":\"eucaimNegotiationID\",\"displayName\":\"EUCAIM negotiation ID\",\"validations\":{},\"annotations\":{\"inputHelperTextAfter\":\"If you have not created a negotiation yet, please cancel this registration and go to: https://negotiator.eucaim.cancerimage.eu\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"external-data-scientist\",\"multivalued\":false},{\"name\":\"additionalComments\",\"displayName\":\"You can include here any additional comment related to your access request.\",\"validations\":{},\"annotations\":{\"inputHelperTextAfter\":\"After your registration, your account must be validated according to the project or negotiation that you indicated in order to you are able to access the platform services. This is not an automated process. You will be notified if accepted.\",\"inputType\":\"textarea\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"additional-comments\",\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"},{\"name\":\"project-member\",\"displayHeader\":\"A) If you are member or collaborator of a project\",\"displayDescription\":\"\",\"annotations\":{}},{\"name\":\"external-data-scientist\",\"displayHeader\":\"B) If you are not member or collaborator of a project\",\"displayDescription\":\"You want to access datasets as an external data scientist.\",\"annotations\":{}},{\"name\":\"additional-comments\",\"displayHeader\":\"Z) Additional comments\",\"displayDescription\":\"\",\"annotations\":{}}],\"unmanagedAttributePolicy\":\"ADMIN_EDIT\"}"
+            "{\"attributes\":[{\"name\":\"username\",\"displayName\":\"${username}\",\"validations\":{\"length\":{\"min\":\"3\",\"max\":\"24\",\"trim-disabled\":\"false\"},\"pattern\":{\"pattern\":\"^[0-9a-z][0-9a-z-]+[0-9a-z]$\",\"error-message\":\"The length must be 3-24 characters, and must contain only lowercase alphanumeric characters or '-'. Examples: james, james-upv, james31\"}},\"annotations\":{\"inputHelperTextBefore\":\"Your unique name in the platform. You will not be able to change it later and short is usually preferred.\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"email\",\"displayName\":\"${email}\",\"validations\":{\"email\":{},\"length\":{\"max\":255}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"firstName\",\"displayName\":\"${firstName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"lastName\",\"displayName\":\"${lastName}\",\"validations\":{\"length\":{\"max\":255},\"person-name-prohibited-characters\":{}},\"required\":{\"roles\":[\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"companyOrOrganization\",\"displayName\":\"Company or organization\",\"validations\":{},\"annotations\":{\"inputHelperTextAfter\":\"Next, you must fill in one of the sections A or B.\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"multivalued\":false},{\"name\":\"projects\",\"displayName\":\"Project (one or more) and working package (if applicable)\",\"validations\":{},\"annotations\":{\"inputTypePlaceholder\":\"Examples: Primage, Leopard, Eucaim WP6\",\"inputHelperTextAfter\":\"Your relation to the project will be checked (you can add anything you consider relevant on this in the section Z)\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"project-member\",\"multivalued\":false},{\"name\":\"requiredRoles\",\"displayName\":\"Required roles\",\"validations\":{\"options\":{\"options\":[\"authorized-technical-data-manager\",\"clinical-staff\",\"dataset-administrator\",\"data-scientists\",\"application-developer\"]}},\"annotations\":{\"inputOptionLabels\":{\"authorized-technical-data-manager\":\"[Data ingester]: Ingest (manually or in-bulk) new patient cases (images or clinical data)\",\"clinical-staff\":\"[Clinical staff]: Use or validate images, data or models in clinical environment\",\"dataset-administrator\":\"[Dataset manager]: Create and manage datasets\",\"data-scientists\":\"[Data scientist]: Run applications in the platform using datasets to develop and train AI models/tools\",\"application-developer\":\"[Application developer]: Develop applications for the platform\"},\"inputType\":\"multiselect-checkboxes\",\"inputHelperTextBefore\":\"What are you going to do in that projects?   (Options: authorized-technical-data-manager. clinical-staff, dataset-administrator, data-scientists, application-developer)\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"project-member\",\"multivalued\":true},{\"name\":\"eucaimNegotiationID\",\"displayName\":\"EUCAIM negotiation ID\",\"validations\":{},\"annotations\":{\"inputHelperTextAfter\":\"If you have not created a negotiation yet, please cancel this registration and go to: https://negotiator.eucaim.cancerimage.eu\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"external-data-scientist\",\"multivalued\":false},{\"name\":\"additionalComments\",\"displayName\":\"You can include here any additional comment related to your access request.\",\"validations\":{},\"annotations\":{\"inputHelperTextAfter\":\"After your registration, your account must be validated according to the project or negotiation that you indicated in order to you are able to access the platform services. This is not an automated process. You will be notified if accepted.\",\"inputType\":\"textarea\"},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"additional-comments\",\"multivalued\":false},{\"name\":\"confirmation\",\"displayName\":\"Do you have filled in the section A or B?\",\"validations\":{\"options\":{\"options\":[\"yes\",\"no\"]}},\"annotations\":{\"inputOptionLabels\":{\"yes\":\"yes I do\",\"no\":\"no, this is a special case I explain in Z) Additional comments\"},\"inputType\":\"select-radiobuttons\"},\"required\":{\"roles\":[\"admin\",\"user\"]},\"permissions\":{\"view\":[\"admin\",\"user\"],\"edit\":[\"admin\",\"user\"]},\"group\":\"additional-comments\",\"multivalued\":false}],\"groups\":[{\"name\":\"user-metadata\",\"displayHeader\":\"User metadata\",\"displayDescription\":\"Attributes, which refer to user metadata\"},{\"name\":\"project-member\",\"displayHeader\":\"A) If you are member or collaborator of a project\",\"displayDescription\":\"\",\"annotations\":{}},{\"name\":\"external-data-scientist\",\"displayHeader\":\"B) If you are not member or collaborator of a project\",\"displayDescription\":\"You want to access datasets as an external data scientist.\",\"annotations\":{}},{\"name\":\"additional-comments\",\"displayHeader\":\"Z) Additional comments\",\"displayDescription\":\"\",\"annotations\":{}}],\"unmanagedAttributePolicy\":\"ADMIN_EDIT\"}"
           ]
         }
       }
@@ -3901,7 +4320,7 @@
       "alias": "CONFIGURE_TOTP",
       "name": "Configure OTP",
       "providerId": "CONFIGURE_TOTP",
-      "enabled": false,
+      "enabled": true,
       "defaultAction": false,
       "priority": 10,
       "config": {}
@@ -4037,7 +4456,7 @@
     "actionTokenGeneratedByUserLifespan.reset-credentials": "",
     "darkMode": "true"
   },
-  "keycloakVersion": "26.2.0",
+  "keycloakVersion": "26.2.5",
   "userManagedAccessAllowed": false,
   "organizationsEnabled": false,
   "verifiableCredentialsEnabled": false,
