@@ -49,6 +49,10 @@ def _localize_minikube(command):
         if inner.startswith("sudo chmod -R 777 "):
             path = inner[len("sudo chmod -R 777 "):]
             return f"sudo chmod -R 777 {path.replace('/var/hostpath-provisioner', host_path)}", None
+        # Pattern: sudo chown -R <user>:<group> <dir>
+        if inner.startswith("sudo chown -R "):
+            path = inner[len("sudo chown -R "):]
+            return f"sudo chown -R {path.replace('/var/hostpath-provisioner', host_path)}", None
         # Pattern: sudo tar -xzf <file> -C <dest>
         if inner.startswith("sudo tar"):
             return None, "Extract files manually to " + host_path + "/..."
@@ -313,6 +317,30 @@ def cmd_output(command):
 def generate_random_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choice(alphabet) for _ in range(length))
+
+## Shared dataset-service / fed-search API token (persisted so BOTH deployments use the same value).
+## Precedence: config.focus.eucaim_search_token > persisted file > freshly generated.
+_eucaim_token_file = os.path.join(SCRIPT_DIR, "eucaim-search-token.txt")
+
+def get_eucaim_search_token():
+    focus_cfg = getattr(CONFIG, 'focus', None)
+    token = (getattr(focus_cfg, 'eucaim_search_token', '') or '').strip() if focus_cfg else ''
+    if token:
+        return token
+    if os.path.exists(_eucaim_token_file):
+        with open(_eucaim_token_file) as _f:
+            token = _f.read().strip()
+        if token:
+            print(f"Reusing existing eucaim-search token from {_eucaim_token_file}")
+            return token
+    token = generate_random_password(40)
+    try:
+        with open(_eucaim_token_file, 'w') as _f:
+            _f.write(token)
+        print(f"Generated and persisted eucaim-search token to {_eucaim_token_file}")
+    except Exception:
+        pass
+    return token
 
 ## Load or generate guacamole admin password (persisted across runs so reinstalls don't break the DB)
 _guac_pw_file = os.path.join(SCRIPT_DIR, "guacamole-eucaim-user-creator-password.txt")
@@ -728,6 +756,7 @@ class Auth_client_secrets():
         self.CLIENT_JOBMAN_SERVICE_SECRET = existing_secrets.get('jobman-service', generate_random_password(32))
         self.CLIENT_KUBERNETES_SECRET = existing_secrets.get('kubernetes', generate_random_password(32))
         self.CLIENT_KUBERNETES_OPERATOR_SECRET = existing_secrets.get('kubernetes-operator', generate_random_password(32))
+        self.CLIENT_ORTHANC_SECRET = existing_secrets.get('orthanc') or generate_random_password(32)
 
         if existing_secrets:
             print(f" Reusing existing client secrets to maintain consistency")
@@ -1075,6 +1104,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
                 l = l.replace("{{ CLIENT_JOBMAN_SERVICE_SECRET }}", auth_client_secrets.CLIENT_JOBMAN_SERVICE_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
+                l = l.replace("{{ CLIENT_ORTHANC_SECRET }}", auth_client_secrets.CLIENT_ORTHANC_SECRET)
                 fout.write(l)
 
     # Keep a copy in the repository root so next installer runs can reuse the same client secrets.
@@ -1548,6 +1578,9 @@ def install_dataset_service(auth_client_secret: str):
                                     for key, value in config["self"].items():
                                         if isinstance(value, str) and value == "XXXXXXXX":
                                             config["self"][key] = generate_random_password(16)
+                                    # Shared fed-search token: inject the SAME value that
+                                    # fed-search will use in its api-keys secret.
+                                    config["self"]["eucaim_search_token"] = get_eucaim_search_token()
 
                                 if "auth" in config and "client" in config["auth"]:
                                     config["auth"]["client"]["client_secret"] = auth_client_secret
@@ -2426,6 +2459,10 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     # Build host homes path from config so K8s deployments do not keep minikube defaults.
     host_homes_users_path = os.path.join(CONFIG.host_path, "data", "homes", "users")
     default_homes_users_path = "/var/hostpath-provisioner/data/homes/users"
+    # In minikube the shared volume is mounted as /var/hostpath-provisioner INSIDE the VM;
+    # the host-side CONFIG.host_path (/home/ubuntu/minikube-data) is not visible to pods, so
+    # it must NOT be substituted into the job template. Only --k8s (NFS host_path) needs it.
+    apply_homes_path_replace = not USE_MINIKUBE
 
     # Read the template file
     with open(template_file, 'r') as f:
@@ -2434,7 +2471,7 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     # Replace all placeholders with actual values
     kube_apiserver_endpoint = str(getattr(CONFIG, 'kubeapiserver_ip', '') or '').strip()
     if not kube_apiserver_endpoint:
-        kube_apiserver_endpoint = 'kubeserver.localdomain:8443' if USE_MINIKUBE else 'kubeserver.localdomain:6443'
+        kube_apiserver_endpoint = 'kubernetes.default.svc:443'
     if not kube_apiserver_endpoint.startswith('http://') and not kube_apiserver_endpoint.startswith('https://'):
         kube_apiserver_endpoint = f'https://{kube_apiserver_endpoint}'
 
@@ -2457,8 +2494,9 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     for placeholder, value in replacements.items():
         content = content.replace(placeholder, value)
 
-    # Replace hardcoded minikube homes path with host_path-based path.
-    content = content.replace(default_homes_users_path, host_homes_users_path)
+    # Replace hardcoded minikube homes path with host_path-based path (--k8s only).
+    if apply_homes_path_replace:
+        content = content.replace(default_homes_users_path, host_homes_users_path)
 
     # Write to the .private.yaml file
     with open(private_file, 'w') as f:
@@ -2483,11 +2521,12 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     cmd(f"sudo cp {scripts_src_dir}/*.py {scripts_data_dir}/")
     cmd(f"sudo cp -r {scripts_src_dir}/templates {scripts_data_dir}/templates")
 
-    cmd(
-        f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
-        f"-name 'user-management-job-template.private.yaml' "
-        f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
-    )
+    if apply_homes_path_replace:
+        cmd(
+            f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
+            f"-name 'user-management-job-template.private.yaml' "
+            f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
+        )
     
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
     print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
@@ -4238,16 +4277,66 @@ def install_fed_search(CONFIG):
 
         provider     = CONFIG.focus.provider
         broker_url   = CONFIG.focus.beam_broker_url
+        cn_domain    = getattr(CONFIG.focus, 'cn_domain', '') or ''
+
+        # --- Generate/refresh this node's beam-proxy private key + CSR ---
+        # proxy_private_key_pem is an OUTPUT file path. If empty or the file is
+        # missing, openssl creates a fresh key and the matching CSR, which the
+        # node administrator must send to the central EUCAIM server.
+        certs_out_dir = os.path.join(SCRIPT_DIR, "certs", "fed-search")
+        try:
+            os.makedirs(certs_out_dir, exist_ok=True)
+        except Exception:
+            pass
+        key_file = (getattr(CONFIG.focus, 'proxy_private_key_pem', '') or '').strip()
+        if not key_file:
+            key_file = os.path.join(certs_out_dir, 'proxy.priv.pem')
+        key_file = os.path.abspath(os.path.expanduser(key_file))
+        csr_file = os.path.join(os.path.dirname(key_file), f'{provider}.csr')
+
+        if not os.path.isfile(key_file):
+            try:
+                os.makedirs(os.path.dirname(key_file), exist_ok=True)
+            except Exception:
+                pass
+            print(" Generating beam-proxy private key (openssl genrsa)...")
+            _gens = cmd_output(f"openssl genrsa -out {shlex.quote(key_file)} 2048 2>&1").strip()
+            if not os.path.isfile(key_file):
+                print("  WARNING: could not generate private key with openssl.")
+                print(f"  Try manually: openssl genrsa -out {key_file} 2048")
+                print("  Beam-proxy pod will fail until key + secret are created manually.")
+                _key_available = False
+            else:
+                os.chmod(key_file, 0o600)
+                _key_available = True
+        else:
+            _key_available = True
+
+        if _key_available:
+            if not os.path.isfile(csr_file):
+                print(" Generating beam-proxy CSR...")
+                subject = f'/CN={provider}.broker.eucaim.cancerimage.eu{cn_domain}'
+                cmd(f"openssl req -key {shlex.quote(key_file)} -new "
+                    f"-subj {shlex.quote(subject)} -out {shlex.quote(csr_file)}")
+            if os.path.isfile(csr_file):
+                print(f" Beam-proxy CSR ready: {csr_file}")
+                print(f"   Subject: /CN={provider}.broker.eucaim.cancerimage.eu{cn_domain}")
+            else:
+                print("  WARNING: failed to generate CSR.")
 
         # Create namespace
         cmd("minikube kubectl -- create namespace federated-search --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
         # --- Secret: api-keys (used by focus deployment) ---
+        # Header is derived from the shared eucaim_search_token so it matches the
+        # self.eucaim_search_token injected into the dataset-service config.
+        _eucaim_token = get_eucaim_search_token()
+        _auth_header = f"Secret {_eucaim_token}"
         cmd(
             f"minikube kubectl -- create secret generic api-keys"
             f" --namespace federated-search"
             f" --from-literal=FOCUS_API_KEY={CONFIG.focus.focus_api_key}"
-            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='{CONFIG.focus.dataset_service_auth_header}'"
+            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='{_auth_header}'"
             f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
         )
         print(" Secret 'api-keys' applied")
@@ -4262,51 +4351,59 @@ def install_fed_search(CONFIG):
         print(" Secret 'spot-beam-secret' applied")
 
         # --- Secret: root-crt-pem (projected volume in beam-proxy pod) ---
-        root_cert_file = "/tmp/root-crt-pem.pem"
-        with open(root_cert_file, "w") as f:
-            f.write(CONFIG.focus.root_crt_pem)
-        cmd(
-            f"minikube kubectl -- create secret generic root-crt-pem"
-            f" --namespace federated-search"
-            f" --from-file=root.crt.pem={root_cert_file}"
-            f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
-        )
-        import os as _os
-        _os.remove(root_cert_file)
-        print(" Secret 'root-crt-pem' applied")
+        # root_crt_pem is now the NAME of the file containing the broker root CA.
+        # A legacy inline PEM value is still accepted.
+        root_raw = (getattr(CONFIG.focus, 'root_crt_pem', '') or '')
+        if root_raw.lstrip().startswith('-----BEGIN'):
+            root_cert_file = "/tmp/root-crt-pem.pem"
+            with open(root_cert_file, "w") as f:
+                f.write(root_raw)
+        else:
+            root_cert_file = os.path.abspath(os.path.expanduser(root_raw.strip())) if root_raw.strip() else ""
+        if root_cert_file and os.path.isfile(root_cert_file):
+            cmd(
+                f"minikube kubectl -- create secret generic root-crt-pem"
+                f" --namespace federated-search"
+                f" --from-file=root.crt.pem={shlex.quote(root_cert_file)}"
+                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+            )
+            print(" Secret 'root-crt-pem' applied")
+        else:
+            print(f"  WARNING: broker root CA file not found at '{root_cert_file}'. "
+                  "Fill certs/fed-search/beam-root-ca.pem (or set focus.root_crt_pem) "
+                  "or beam-proxy will fail TLS verification.")
+        if root_raw.lstrip().startswith('-----BEGIN'):
+            try:
+                os.remove("/tmp/root-crt-pem.pem")
+            except OSError:
+                pass
 
         # --- Secret: private key (skip if secret already exists - user manages it manually) ---
-        proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', '')
-        if proxy_private_key_pem:
-            _priv_secret_name = "certs"
-            try:
-                with open("beam.yaml") as _f:
-                    import re as _re
-                    _m = _re.search(r'secret:\s*\n\s+name:\s+(\S+)', _f.read())
-                    if _m:
-                        _priv_secret_name = _m.group(1)
-            except Exception:
-                pass
-            _exists = cmd(
-                f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search 2>/dev/null",
-                exit_on_error=False,
+        _priv_secret_name = "certs"
+        try:
+            with open("beam.yaml") as _f:
+                import re as _re
+                _m = _re.search(r'secret:\s*\n\s+name:\s+(\S+)', _f.read())
+                if _m:
+                    _priv_secret_name = _m.group(1)
+        except Exception:
+            pass
+        _exists = cmd(
+            f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search 2>/dev/null",
+            exit_on_error=False,
+        )
+        if _exists == 0:
+            print(f" Secret '{_priv_secret_name}' already exists, skipping.")
+        elif _key_available:
+            cmd(
+                f"minikube kubectl -- create secret generic {_priv_secret_name}"
+                f" --namespace federated-search"
+                f" --from-file=proxy.pem={shlex.quote(key_file)}"
+                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
             )
-            if _exists == 0:
-                print(f" Secret '{_priv_secret_name}' already exists, skipping.")
-            else:
-                privkey_file = "/tmp/beam-privkey.pem"
-                with open(privkey_file, "w") as f:
-                    f.write(proxy_private_key_pem)
-                cmd(
-                    f"minikube kubectl -- create secret generic {_priv_secret_name}"
-                    f" --namespace federated-search"
-                    f" --from-file=proxy.pem={privkey_file}"
-                    f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
-                )
-                import os as _os2; _os2.remove(privkey_file)
-                print(f" Secret '{_priv_secret_name}' created")
+            print(f" Secret '{_priv_secret_name}' created from {key_file}")
         else:
-            print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
+            print("  WARNING: 'focus.proxy_private_key_pem' not set and key generation failed.")
             print("  Beam-proxy pod will fail until this secret is created manually.")
 
         # --- Focus deployment ---
@@ -4347,6 +4444,18 @@ def install_fed_search(CONFIG):
         print(f"\n Federated search installed successfully!")
         print(f"   Beam app ID: focus.{provider}.broker.eucaim.cancerimage.eu")
         print(f"   Broker: {broker_url}")
+
+        if os.path.isfile(csr_file):
+            print("\n" + "="*80)
+            print(" IMPORTANT: send the beam-proxy CSR to the central EUCAIM server:")
+            print("="*80)
+            print(f"   CSR file (to send):  {csr_file}")
+            print(f"   Private key (keep local, do NOT send): {key_file}")
+            print(f"   Subject: /CN={provider}.broker.eucaim.cancerimage.eu{cn_domain}")
+            print(f"   Send {shlex.quote(os.path.basename(csr_file))} to the EUCAIM central broker")
+            print("   administrators to obtain this node's signed certificate.")
+            print("   The federated search will not fully work until the certificate")
+            print("   returned by the central server is deployed to the beam-proxy pod.")
 
     finally:
         os.chdir(prev_dir)
@@ -4528,7 +4637,7 @@ def apply_pod_priorities():
 
     print(f" Pod priority classes applied successfully")
 
-def install_orthanc(CONFIG):
+def install_orthanc(CONFIG, auth_client_secrets=None):
     '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
     print(f"\n{'='*80}")
     print(" Installing Orthanc PACS Server")
@@ -4669,7 +4778,21 @@ def install_orthanc(CONFIG):
                         "  Warning: @meteorjs/reify runtime not found after bootstrap; "
                         "orthanc-wrapper may still fail with missing module errors"
                     )
-                rewrite_orthanc_wrapper_app_json("/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain)
+                wrapper_host_side_dir = os.path.abspath(os.path.expanduser(
+                    os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
+                ))
+                wrapper_rewritten = rewrite_orthanc_wrapper_app_json(wrapper_host_side_dir, CONFIG.public_domain)
+                if not wrapper_rewritten and wrapper_host_side_dir != "/var/hostpath-provisioner/orthanc/orthanc-wrapper":
+                    wrapper_rewritten = rewrite_orthanc_wrapper_app_json(
+                        "/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain
+                    )
+                # Fallback: rewrite inside the VM, in case host side is not the mounted path.
+                cmd(
+                    "minikube ssh -- 'sudo sed -i "
+                    f"s/node-demo.imaging.i3m.upv.es/{CONFIG.public_domain}/g"
+                    " /var/hostpath-provisioner/orthanc/orthanc-wrapper/app.json 2>/dev/null || true'",
+                    exit_on_error=False,
+                )
         elif os.path.isfile(wrapper_repo_tar):
             print(" Installing orthanc-wrapper payload (K8s mode)...")
             copy_ret = cmd(
@@ -4775,7 +4898,9 @@ def install_orthanc(CONFIG):
             db_keycloak_password_q = shlex.quote(oc.db_keycloak_password or '')
             kc_admin_user_q = shlex.quote(oc.kc_admin_user or '')
             kc_admin_password_q = shlex.quote(oc.kc_admin_password or '')
-            kc_client_secret_q = shlex.quote(oc.kc_client_secret or '')
+            kc_client_secret_q = shlex.quote(
+                auth_client_secrets.CLIENT_ORTHANC_SECRET if auth_client_secrets is not None else ''
+            )
             svc_user_q = shlex.quote(svc_user)
             svc_pw_q = shlex.quote(svc_pw)
             users_json_q = shlex.quote(users_json)
@@ -4877,42 +5002,11 @@ def install_orthanc(CONFIG):
         else:
             print(f"  Warning: {ingress_file} not found")
 
-        # Setup bindfs mounts on the minikube node so that desktops and jobman
-        # can access datalake files with symlinks resolved to the real DICOM files.
-        if USE_MINIKUBE:
-            print(" Setting up bindfs mounts on minikube node...")
-            cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
-
-            # 1. /var/lib/orthanc → actual orthanc storage (needed to resolve symlinks)
-            cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
-            cmd("minikube ssh -- '"
-                "sudo sed -i \"/var\\/lib\\/orthanc/d\" /etc/fstab && "
-                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
-                "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-                " | sudo tee -a /etc/fstab > /dev/null'")
-
-            # 2. /mnt/datalake → Orthanc storage_link with symlinks resolved (for desktops/jobman)
-            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/orthanc/orthanc-storage/storage_link'")
-            cmd("minikube ssh -- '"
-                "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
-                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage/storage_link"
-                "     /mnt/datalake  fuse.bindfs  ro,resolve-symlinks,perms=o+rD,dev,suid  0  2\\n\""
-                " | sudo tee -a /etc/fstab > /dev/null'")
-
-            # 3. /mnt/datasets → datasets (for desktops/jobman)
-            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
-            cmd("minikube ssh -- '"
-                "sudo sed -i \"/mnt\\/datasets/d\" /etc/fstab && "
-                "printf \"/var/hostpath-provisioner/dataset-service/datasets"
-                "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
-                " | sudo tee -a /etc/fstab > /dev/null'")
-
-            # Reload systemd so it sees the new fstab, then (re)mount all three
-            cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
-            cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
-            cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
-            cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
-        else:
+        # NOTE: bindfs mounts (/mnt/datalake, /mnt/datasets, /var/lib/orthanc)
+        # are NOT created in minikube mode. /var/hostpath-provisioner is the
+        # host-shared data dir and the dataset-service pod mounts the datalake
+        # PVC directly, so bindfs over it is unnecessary and causes confusion.
+        if not USE_MINIKUBE:
             hp = CONFIG.host_path.rstrip('/')
             datalake_candidates = [
                 f"{hp}/orthanc/orthanc-storage/storage_link",
@@ -5287,7 +5381,7 @@ def install(flavor):
 
     # Orthanc PACS server is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
-        install_orthanc(CONFIG)
+        install_orthanc(CONFIG, auth_client_secrets)
 
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "mini", "standard"]:
@@ -5357,6 +5451,24 @@ def install(flavor):
     if flavor in ["micro", "standard"]:
         print(f" Guacamole: https://{CONFIG.public_domain}/guacamole")
         print(f" Kubeapps: https://{CONFIG.public_domain}/apps/")
+
+    # Final federated-search reminder: the user must send the CSR to the central server.
+    if hasattr(CONFIG, 'focus') and flavor in ["mini", "standard"]:
+        try:
+            _csr = os.path.join(
+                os.path.dirname(getattr(CONFIG.focus, 'proxy_private_key_pem', '') or os.path.join(SCRIPT_DIR, "certs", "fed-search", "proxy.priv.pem")),
+                f'{CONFIG.focus.provider}.csr',
+            )
+            if os.path.isfile(_csr):
+                print(f"\n{'='*80}")
+                print(" FEDERATED SEARCH - REMAINING ACTION:")
+                print(f"{'='*80}")
+                print(f"   Send the CSR file to the EUCAIM central broker:")
+                print(f"     {_csr}")
+                print("   Once the signed certificate is returned by the central server,")
+                print("   deploy it to the beam-proxy pod to complete federated search setup.")
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
