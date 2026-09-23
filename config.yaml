@@ -87,23 +87,14 @@ guacamole:
   adminPassword: "xxxxxxxxx"
 
 focus:
-  provider: "YOUR_PROV"
+  provider: "myprovidername"
     # Short provider identifier, e.g. 'upv' — used in beam app IDs
+  proxy_private_key_pem: ""
   focus_api_key: "changeme"
     # API key for the focus application (from beam broker registration)
-  dataset_service_auth_header: "Basic changeme"
+  dataset_service_auth_header: "changeme"
     # Authorization header value for dataset-service API calls (Base64 encoded credentials)
   beam_broker_url: "https://broker.eucaim.cancerimage.eu"
     # URL of the EUCAIM beam broker
-  root_crt_pem: |
-    -----BEGIN CERTIFICATE-----
-    REPLACE_WITH_BROKER_ROOT_CA_PEM
-    -----END CERTIFICATE-----
-    # PEM-encoded root CA certificate of the beam broker (for TLS verification)
-  proxy_private_key_pem: |
-    -----BEGIN PRIVATE KEY-----
-    REPLACE_WITH_PROXY_PRIVATE_KEY_PEM
-    -----END PRIVATE KEY-----
-    # PEM-encoded private key of this node's beam proxy certificate (not base64, raw PEM)
-
+  root_crt_pem: "root_ca_cert.pem"
 
