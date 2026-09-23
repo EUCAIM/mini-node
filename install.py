@@ -688,10 +688,12 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
     if not wrapper_dir or not os.path.isdir(wrapper_dir):
         return False
 
-    old_root_url = "https://node-demo.imaging.i3m.upv.es/wrapper"
+
     new_root_url = f"https://{public_domain}/wrapper"
-    old_domain_url = "https://node-demo.imaging.i3m.upv.es"
-    new_domain_url = f"https://{public_domain}"
+    # Empty placeholders: "https:///wrapper" and "domainURL": "https://"
+    empty_root_url = "https:///wrapper"
+    empty_domain_url = '"domainURL": "https://"'
+    filled_domain_url = f'"domainURL": "https://{public_domain}"'
 
     changed = False
     for root, _dirs, files in os.walk(wrapper_dir):
@@ -707,10 +709,8 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
             continue
 
         updated = content
-        updated = updated.replace(old_root_url, new_root_url)
-        updated = updated.replace(old_domain_url, new_domain_url)
-        updated = updated.replace("node-demo.imaging.i3m.upv.es", public_domain)
-        updated = updated.replace("node-demo", public_domain)
+        updated = updated.replace(empty_root_url, new_root_url)
+        updated = updated.replace(empty_domain_url, filled_domain_url)
 
         if updated != content:
             try:
