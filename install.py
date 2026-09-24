@@ -688,10 +688,13 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
     if not wrapper_dir or not os.path.isdir(wrapper_dir):
         return False
 
-    old_root_url = "https://node-demo.imaging.i3m.upv.es/wrapper"
     new_root_url = f"https://{public_domain}/wrapper"
-    old_domain_url = "https://node-demo.imaging.i3m.upv.es"
     new_domain_url = f"https://{public_domain}"
+
+    # Empty placeholders: "https:///wrapper" and "domainURL": "https://"
+    empty_root_url = "https:///wrapper"
+    empty_domain_url = '"domainURL": "https://"'
+    filled_domain_url = f'"domainURL": "https://{public_domain}"'
 
     changed = False
     for root, _dirs, files in os.walk(wrapper_dir):
@@ -707,10 +710,8 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
             continue
 
         updated = content
-        updated = updated.replace(old_root_url, new_root_url)
-        updated = updated.replace(old_domain_url, new_domain_url)
-        updated = updated.replace("node-demo.imaging.i3m.upv.es", public_domain)
-        updated = updated.replace("node-demo", public_domain)
+        updated = updated.replace(empty_root_url, new_root_url)
+        updated = updated.replace(empty_domain_url, filled_domain_url)
 
         if updated != content:
             try:
@@ -4786,11 +4787,17 @@ def install_orthanc(CONFIG, auth_client_secrets=None):
                     wrapper_rewritten = rewrite_orthanc_wrapper_app_json(
                         "/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain
                     )
-                # Fallback: rewrite inside the VM, in case host side is not the mounted path.
+                # Fallback: rewrite inside the VM via sed, covering both the
+                # legacy "node-demo" references and the empty placeholders
+                # ("https:///wrapper", "domainURL": "https://").
+                _wrapper_domain = CONFIG.public_domain
                 cmd(
                     "minikube ssh -- 'sudo sed -i "
-                    f"s/node-demo.imaging.i3m.upv.es/{CONFIG.public_domain}/g"
-                    " /var/hostpath-provisioner/orthanc/orthanc-wrapper/app.json 2>/dev/null || true'",
+                    f"\"s|https:///wrapper|https://{_wrapper_domain}/wrapper|g; "
+                    f"s|\\\"domainURL\\\": \\\"https://\\\"|\\\"domainURL\\\": \\\"https://{_wrapper_domain}\\\"|g; "
+                    f"s|node-demo.imaging.i3m.upv.es|{_wrapper_domain}|g\" "
+                    "/var/hostpath-provisioner/orthanc/orthanc-wrapper/app.json "
+                    "2>/dev/null || true'",
                     exit_on_error=False,
                 )
         elif os.path.isfile(wrapper_repo_tar):
