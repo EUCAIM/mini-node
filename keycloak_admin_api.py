@@ -111,20 +111,27 @@ class KeycloakAdminAPIClient:
             raise KeycloakAdminAPIException('Internal server error: KeycloakAdminAPI call failed.', httpStatusCode)
         logging.root.debug('KeycloakAdminAPI call success.')
 
-    def createSpecialUser(self, username, email, firstName, lastName):
-
-        logging.root.debug('Creatingg user attribute with KeycloakAdminAPI...')
+    
+    def createSpecialUser(self, username, email, firstName, lastName, groupPaths: list[str]):
+        logging.root.debug('Creating user with KeycloakAdminAPI...')
         user = {
-            "requiredActions":[],
-            "emailVerified":True,
-            "username":username,
-            "email":email,
-            "firstName":firstName,
-            "lastName":lastName,
-            "attributes":{"companyOrOrganization":"","projects":"","eucaimNegotiationID":"","additionalComments":"","confirmation":["no"]},
-            "groups":[],
-            "enabled":True}
-
+            "requiredActions": [],
+            "emailVerified": True,
+            "username": username,
+            "email": email,
+            "firstName": firstName,
+            "lastName": lastName,
+            "attributes": {"companyOrOrganization":"","projects":"","eucaimNegotiationID":"","additionalComments":"","confirmation":["no"]},
+            "groups": groupPaths,
+            "enabled": True}
         self._POST_JSON("users", json.dumps(user))
 
-    
+    def putPasswordToUser(self, username, password):
+        userId = self.getUserId(username)
+        if userId is None: raise KeycloakAdminAPIException('Unknown username.')
+        logging.root.debug('Puting password to user with KeycloakAdminAPI...')
+        req = {"temporary": False,
+               "type": "password",
+               "value": password}
+        self._PUT_JSON("users/"+userId+"/reset-password", json.dumps(req))
+

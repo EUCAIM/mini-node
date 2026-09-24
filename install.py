@@ -4754,6 +4754,31 @@ def install_clinical_data_sql_db():
         os.chdir(prev_dir)
 
 
+def create_platform_admin_user(auth_client_secrets: Auth_client_secrets):
+    if CONFIG is None:
+        raise Exception("CONFIG is None")
+    if not hasattr(CONFIG, "platform_admin_username"):
+        print("Skipping platform admin creation because it's not defined in config.")
+        return
+
+    print(f"\n Creating platform admin user in Keycloak...")
+    auth_endpoint = f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token"
+    auth_client = AuthClient(auth_endpoint, 'dataset-service', login_as_service_account=True,
+                             client_secret=auth_client_secrets.CLIENT_DATASET_SERVICE_SECRET)
+    keycloak_admin_api_endpoint = f"https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/"
+    admin_client = KeycloakAdminAPIClient(auth_client, keycloak_admin_api_endpoint)
+
+    admin_client.createSpecialUser(
+        username = CONFIG.platform_admin_username,
+        email = CONFIG.platform_admin_email,
+        firstName = "Platform",
+        lastName = "Manager",
+        groupPaths = ["/cloud-services-and-security-management"]
+    )
+    admin_client.putPasswordToUser(CONFIG.platform_admin_username, CONFIG.platform_admin_password)
+    print(f" platform admin user successfully created in Keycloak")
+
+
 def uninstall_mini_node(config=None, purge_data=False):
     '''Uninstall resources deployed by this installer without touching core cluster components.'''
     print(f"\n{'='*80}")
@@ -4999,6 +5024,7 @@ def install(flavor):
 
     # Keycloak is installed in all flavors
     install_keycloak(auth_client_secrets)
+    create_platform_admin_user(auth_client_secrets)
 
     # Configure kube-apiserver with OIDC - done AFTER Keycloak so the OIDC issuer URL is reachable
     configure_kube_apiserver_oidc(CONFIG)
