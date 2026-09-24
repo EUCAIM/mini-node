@@ -688,12 +688,10 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
     if not wrapper_dir or not os.path.isdir(wrapper_dir):
         return False
 
-
+    old_root_url = "https://node-demo.imaging.i3m.upv.es/wrapper"
     new_root_url = f"https://{public_domain}/wrapper"
-    # Empty placeholders: "https:///wrapper" and "domainURL": "https://"
-    empty_root_url = "https:///wrapper"
-    empty_domain_url = '"domainURL": "https://"'
-    filled_domain_url = f'"domainURL": "https://{public_domain}"'
+    old_domain_url = "https://node-demo.imaging.i3m.upv.es"
+    new_domain_url = f"https://{public_domain}"
 
     changed = False
     for root, _dirs, files in os.walk(wrapper_dir):
@@ -709,8 +707,10 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
             continue
 
         updated = content
-        updated = updated.replace(empty_root_url, new_root_url)
-        updated = updated.replace(empty_domain_url, filled_domain_url)
+        updated = updated.replace(old_root_url, new_root_url)
+        updated = updated.replace(old_domain_url, new_domain_url)
+        updated = updated.replace("node-demo.imaging.i3m.upv.es", public_domain)
+        updated = updated.replace("node-demo", public_domain)
 
         if updated != content:
             try:
@@ -2527,7 +2527,7 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
             f"-name 'user-management-job-template.private.yaml' "
             f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
         )
-    
+
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
     print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
 
@@ -5002,11 +5002,42 @@ def install_orthanc(CONFIG, auth_client_secrets=None):
         else:
             print(f"  Warning: {ingress_file} not found")
 
-        # NOTE: bindfs mounts (/mnt/datalake, /mnt/datasets, /var/lib/orthanc)
-        # are NOT created in minikube mode. /var/hostpath-provisioner is the
-        # host-shared data dir and the dataset-service pod mounts the datalake
-        # PVC directly, so bindfs over it is unnecessary and causes confusion.
-        if not USE_MINIKUBE:
+        # Setup bindfs mounts on the minikube node so that desktops and jobman
+        # can access datalake files with symlinks resolved to the real DICOM files.
+        if USE_MINIKUBE:
+            print(" Setting up bindfs mounts on minikube node...")
+            cmd("minikube ssh -- 'sudo apt-get update -qq && sudo apt-get install -y -qq bindfs'")
+
+            # 1. /var/lib/orthanc → actual orthanc storage (needed to resolve symlinks)
+            cmd("minikube ssh -- 'sudo mkdir -p /var/lib/orthanc'")
+            cmd("minikube ssh -- '"
+                "sudo sed -i \"/var\\/lib\\/orthanc/d\" /etc/fstab && "
+                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage"
+                "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                " | sudo tee -a /etc/fstab > /dev/null'")
+
+            # 2. /mnt/datalake → Orthanc storage_link with symlinks resolved (for desktops/jobman)
+            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/orthanc/orthanc-storage/storage_link'")
+            cmd("minikube ssh -- '"
+                "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
+                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage/storage_link"
+                "     /mnt/datalake  fuse.bindfs  ro,resolve-symlinks,perms=o+rD,dev,suid  0  2\\n\""
+                " | sudo tee -a /etc/fstab > /dev/null'")
+
+            # 3. /mnt/datasets → datasets (for desktops/jobman)
+            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datasets'")
+            cmd("minikube ssh -- '"
+                "sudo sed -i \"/mnt\\/datasets/d\" /etc/fstab && "
+                "printf \"/var/hostpath-provisioner/dataset-service/datasets"
+                "  /mnt/datasets  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                " | sudo tee -a /etc/fstab > /dev/null'")
+
+            # Reload systemd so it sees the new fstab, then (re)mount all three
+            cmd("minikube ssh -- 'sudo systemctl daemon-reload'")
+            cmd("minikube ssh -- 'sudo umount /var/lib/orthanc 2>/dev/null || true && sudo mount /var/lib/orthanc'")
+            cmd("minikube ssh -- 'sudo umount /mnt/datalake 2>/dev/null || true && sudo mount /mnt/datalake'")
+            cmd("minikube ssh -- 'sudo umount /mnt/datasets 2>/dev/null || true && sudo mount /mnt/datasets'")
+        else:
             hp = CONFIG.host_path.rstrip('/')
             datalake_candidates = [
                 f"{hp}/orthanc/orthanc-storage/storage_link",
