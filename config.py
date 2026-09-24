@@ -44,9 +44,12 @@ class Config:
         # Optional: Platform admin user (simple fields, not a class)
         if 'platform_admin_user' in cfg:
             pa = cfg['platform_admin_user']
-            self.platform_admin_username = pa.get('username')
-            self.platform_admin_email = pa.get('email')
-            self.platform_admin_password = pa.get('password')
+            if pa.get('password', 'supersecret_platform_admin') == 'supersecret_platform_admin':  
+                pass   # the default password is not acceptable
+            else:
+                self.platform_admin_username = pa.get('username')
+                self.platform_admin_email = pa.get('email')
+                self.platform_admin_password = pa.get('password')
         
         # Optional: Let's Encrypt configuration for TLS certificates
         if 'letsencrypt' in cfg:
