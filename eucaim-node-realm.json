@@ -55,7 +55,11 @@
         "description": "Ingestion of studies in datalake.",
         "composite": true,
         "composites": {
-          "client": {}
+          "client": {
+            "orthanc": [
+              "data-uploader"
+            ]
+          }
         },
         "clientRole": false,
         "containerId": "b68a9c3c-881b-41c5-a771-25291e6b3f62",
@@ -141,6 +145,9 @@
         "composite": true,
         "composites": {
           "client": {
+            "orthanc": [
+              "dataset-manager"
+            ],
             "dataset-service": [
               "admin_datasets"
             ]
@@ -493,6 +500,15 @@
         }
       ],
       "orthanc": [
+        {
+          "id": "4f437624-381d-4952-8292-1d4ad6a066a0",
+          "name": "data-uploader",
+          "description": "",
+          "composite": false,
+          "clientRole": true,
+          "containerId": "ec843f28-1365-4160-b634-15b79baa53fe",
+          "attributes": {}
+        },
         {
           "id": "bca5be5d-c984-449a-b58b-a31806ac56fe",
           "name": "admin",
