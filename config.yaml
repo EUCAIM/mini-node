@@ -4,6 +4,20 @@ host_path: "/home/ubuntu/minikube-data/"
 public_domain: "mininode.imaging.i3m.upv.es"
   # The public domain where the node will be accessible
 
+kubeapiserver_ip: "kubeserver.localdomain:6443"
+  # Optional. Kubernetes API server endpoint used by user-management jobs.
+  # Format: "HOST:PORT" (example: "kubeserver.localdomain:6443")
+  # If empty, defaults are:
+  # - minikube mode: kubeserver.localdomain:8443
+  # - --k8s mode:    kubeserver.localdomain:6443
+
+nfs_server: "kubeserver.localdomain"
+  # Optional. NFS server host/IP for mounting the host_path root in --k8s mode.
+  # Example: nfs_server="kubeserver.localdomain", nfs_share="/pv"
+nfs_share: "/pv"
+  # Optional. Exported NFS share path to mount (default: /pv).
+
+
 postgres:
   db_password: "yourdbpassword"
   username: "yourusername"
@@ -73,8 +87,9 @@ guacamole:
   adminPassword: "xxxxxxxxx"
 
 focus:
-  provider: "YOUR_PROV"
+  provider: "myprovidername"
     # Short provider identifier, e.g. 'upv' — used in beam app IDs
+  proxy_private_key_pem: ""
   focus_api_key: "changeme"
     # API key for the focus application (from beam broker registration)
   dataset_service_auth_header: "changeme"
@@ -86,15 +101,25 @@ focus:
     # and persisted so that both sides always use the SAME value.
   beam_broker_url: "https://broker.eucaim.cancerimage.eu"
     # URL of the EUCAIM beam broker
-  root_crt_pem: |
-    -----BEGIN CERTIFICATE-----
-    REPLACE_WITH_BROKER_ROOT_CA_PEM
-    -----END CERTIFICATE-----
-    # PEM-encoded root CA certificate of the beam broker (for TLS verification)
-  proxy_private_key_pem: |
-    -----BEGIN PRIVATE KEY-----
-    REPLACE_WITH_PROXY_PRIVATE_KEY_PEM
-    -----END PRIVATE KEY-----
-    # PEM-encoded private key of this node's beam proxy certificate (not base64, raw PEM)
-
+root_crt_pem: |
+  -----BEGIN CERTIFICATE-----
+  MIIDNTCCAh2gAwIBAgIUTtokywlnbrGrgPwFRuAir6L1+4wDQYJKoZIhvcNAQEL
+  BQAwFjEUMBIGA1UEAxMLQnJva2VyLVJvb3QwHhcNMjMwOTI4MTUyNjI5WhcNMzMw
+  OTI1MTUyNjU5WjAWMRQwEgYDVQQDEwtCcm9rZXItUm9vdDCCASIwDQYJKoZIhvcN
+  AQEBBQADggEPADCCAQoCggEBALF5cf8ti8puKY8skhk27W5kymOlsmNib4Xyq3Cy
+  nSsOVVyUoXFMymWMZspNr93ggGyJRxD9ZzJh6g9uaOxNW55Nc0eVpO6du349g9es
+  HkZPjI7MmpSf404kCUzOCZOaGqG6FRyAmDFoflFc+QAXR8oW8M1UWP+O77nDq2BV
+  NnOXZiGLOHDJZdBVbsnSchgs5yyMwWVXOqggN91cyChFESgsNEBcjJzX4+zrwDI
+  oG7YkQ+W1Nv3RrFcCN5xDh+kNH16JSPOg5ePN649wD1tsgmdNeEDRlAmxidGxALt
+  FxvUFtHR9OzJYZJKxtUBiAQtitzEpDF5M6JSJ0H3zCtHCukCAwEAAaN7MHkwDgYD
+  VR0PAQHBAQDAgEGMA8GA1UdEwEBwQFMAMBAf8wHQYDVR0OBBYEFASCKucOWMh6
+  dnHN9N0KZqGpyTCJMB8GA1UdIwQYMBaAFASCKucOWMh6dnHN9N0KZqGpyTCJMBYG
+  A1UdEQQPMA2CC0Jyb2tlci1Sb290MA0GCSqGSIb3DQEBCwUAA4IBAQCFT7jHDlxd
+  IZbDhxoaZUc2WxZK6YI5TWo4qFGYTo1MKzat45oviajRyOujQwoTaHOR5EUMBrA5
+  ew9wY8KfMot9fEcAkYbLZ9FlFUZ9NZcE36WMxMvL7eXYNlcjYRw1kUmUROXhZ77
+  ygVaLNvI2DRrggqc7wczDls232JclkU30Oc2hicIZz8CAaJTPepz3NdY8Goh6L4A
+  MiEOTfAejUoqG9+gYGbdukhmEaIDD1ZQCEamhEAGKU7coge+zD1LKEUVSVc7LWij
+  Nw4xKma6qjee5wrvqie2Gi4UEBOKfra6OMcKLm8s4tomcYIwL5HCYvPOh4SL6hib
+  8ECWHiZniNri
+  -----END CERTIFICATE-----
 

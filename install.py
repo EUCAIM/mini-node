@@ -49,6 +49,10 @@ def _localize_minikube(command):
         if inner.startswith("sudo chmod -R 777 "):
             path = inner[len("sudo chmod -R 777 "):]
             return f"sudo chmod -R 777 {path.replace('/var/hostpath-provisioner', host_path)}", None
+        # Pattern: sudo chown -R <user>:<group> <dir>
+        if inner.startswith("sudo chown -R "):
+            path = inner[len("sudo chown -R "):]
+            return f"sudo chown -R {path.replace('/var/hostpath-provisioner', host_path)}", None
         # Pattern: sudo tar -xzf <file> -C <dest>
         if inner.startswith("sudo tar"):
             return None, "Extract files manually to " + host_path + "/..."
@@ -125,6 +129,7 @@ def get_node_ip():
         except subprocess.CalledProcessError:
             return ""
 
+
 def _normalize_storage_class_name(value: str) -> str:
     """Normalize jsonpath output to a single storage class name."""
     value = (value or "").strip().strip("'\"")
@@ -184,6 +189,11 @@ def _nfs_server_base():
     Returns (server, base_path) or (None, None) in minikube mode or if not found."""
     if USE_MINIKUBE:
         return None, None
+    # Config override takes precedence, so private/internal IPs can be enforced.
+    cfg_server = str(getattr(CONFIG, 'nfs_server', '') or '').strip() if CONFIG is not None else ''
+    cfg_share = str(getattr(CONFIG, 'nfs_share', '') or '').strip() if CONFIG is not None else ''
+    if cfg_server:
+        return cfg_server, (cfg_share or "/pv")
     server = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
     share = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip()
     if server and share:
@@ -191,6 +201,48 @@ def _nfs_server_base():
     if server:
         return server, "/pv"
     return None, None
+
+
+def ensure_nfs_hostpath_mount(config):
+    """Ensure NFS share for host_path root is persistently mounted in --k8s mode.
+
+    This prevents jobs from failing with missing directories like
+    /pv/data/homes/users when host_path is backed by NFS.
+    """
+    if USE_MINIKUBE:
+        return
+
+    host_path = str(getattr(config, 'host_path', '') or '').strip()
+    if not host_path.startswith('/'):
+        return
+
+    nfs_server, nfs_share = _nfs_server_base()
+    if not nfs_server:
+        if host_path == '/pv' or host_path.startswith('/pv/'):
+            print(" Warning: host_path is under /pv but no NFS server configured/detected.")
+            print("  Set nfs_server in config.private.yaml to auto-mount and persist /pv in /etc/fstab.")
+        return
+
+    mount_point = (nfs_share or '/pv').strip()
+    source = f"{nfs_server}:{nfs_share or '/pv'}"
+    fstab_opts = "defaults,_netdev,nofail,x-systemd.automount,proto=tcp"
+    fstab_line = f"{source} {mount_point} nfs {fstab_opts} 0 0"
+
+    print(f" Ensuring NFS mount for host path root: {source} -> {mount_point}")
+    cmd(f"sudo mkdir -p {shlex.quote(mount_point)}", exit_on_error=False)
+
+    # Replace previous entry for this mount point to avoid duplicates/stale server IPs.
+    mp_pattern = mount_point.replace('/', r'\/')
+    cmd(f"sudo sed -i '/[[:space:]]{mp_pattern}[[:space:]]/d' /etc/fstab", exit_on_error=False)
+    cmd(f"echo {shlex.quote(fstab_line)} | sudo tee -a /etc/fstab > /dev/null", exit_on_error=False)
+    cmd("sudo systemctl daemon-reload", exit_on_error=False)
+    cmd(f"sudo mountpoint -q {shlex.quote(mount_point)} || sudo mount {shlex.quote(mount_point)}", exit_on_error=False)
+
+    mounted_from = cmd_output(f"findmnt -n -o SOURCE --target {shlex.quote(mount_point)} 2>/dev/null").strip()
+    if mounted_from:
+        print(f" NFS mount active on {mount_point}: {mounted_from}")
+    else:
+        print(f"  Warning: could not verify active mount on {mount_point}")
 
 
 def _convert_hostpath_pvs_to_nfs(yaml_path: str, namespace: str = ""):
@@ -265,6 +317,30 @@ def cmd_output(command):
 def generate_random_password(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(random.choice(alphabet) for _ in range(length))
+
+## Shared dataset-service / fed-search API token (persisted so BOTH deployments use the same value).
+## Precedence: config.focus.eucaim_search_token > persisted file > freshly generated.
+_eucaim_token_file = os.path.join(SCRIPT_DIR, "eucaim-search-token.txt")
+
+def get_eucaim_search_token():
+    focus_cfg = getattr(CONFIG, 'focus', None)
+    token = (getattr(focus_cfg, 'eucaim_search_token', '') or '').strip() if focus_cfg else ''
+    if token:
+        return token
+    if os.path.exists(_eucaim_token_file):
+        with open(_eucaim_token_file) as _f:
+            token = _f.read().strip()
+        if token:
+            print(f"Reusing existing eucaim-search token from {_eucaim_token_file}")
+            return token
+    token = generate_random_password(40)
+    try:
+        with open(_eucaim_token_file, 'w') as _f:
+            _f.write(token)
+        print(f"Generated and persisted eucaim-search token to {_eucaim_token_file}")
+    except Exception:
+        pass
+    return token
 
 ## Load or generate guacamole admin password (persisted across runs so reinstalls don't break the DB)
 _guac_pw_file = os.path.join(SCRIPT_DIR, "guacamole-eucaim-user-creator-password.txt")
@@ -511,6 +587,67 @@ def ensure_namespace_active(namespace: str, timeout_seconds: int = 180) -> bool:
     return final_phase == "Active"
 
 
+def wait_for_kube_apiserver(max_wait: int = 180, interval: int = 5, context: str = "") -> bool:
+    """Wait until kube-apiserver /healthz returns ok."""
+    if context:
+        print(f" Waiting for kube-apiserver to be ready ({context})...")
+    else:
+        print(" Waiting for kube-apiserver to be ready...")
+
+    waited = 0
+    while waited < max_wait:
+        api_ok = cmd_output(f"{KUBECTL} get --raw=/healthz 2>/dev/null").strip().strip("'\"")
+        if api_ok == "ok":
+            print(" kube-apiserver is ready")
+            return True
+        time.sleep(interval)
+        waited += interval
+        if waited % max(15, interval) == 0:
+            print(f"   Still waiting for API server... ({waited}s)")
+
+    print(f"  Warning: kube-apiserver did not become ready after {max_wait}s")
+    return False
+
+
+def rollback_kube_apiserver_oidc_flags() -> bool:
+    """Remove OIDC flags from kube-apiserver manifest and wait for recovery."""
+    print(" Attempting kube-apiserver OIDC rollback (remove --oidc-* flags)...")
+    cmd(
+        "minikube ssh -- '"
+        "APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml; "
+        "if [ -f /tmp/kube-apiserver.yaml.pre-oidc.bak ]; then "
+        "  sudo cp /tmp/kube-apiserver.yaml.pre-oidc.bak $APISERVER_YAML; "
+        "else "
+        "  sudo sed -i \"/--oidc-/d\" $APISERVER_YAML; "
+        "fi'",
+        exit_on_error=False,
+    )
+    return wait_for_kube_apiserver(max_wait=240, interval=5, context="after OIDC rollback")
+
+
+def oidc_issuer_is_reachable(public_domain: str) -> bool:
+    """Return True if OIDC discovery endpoint is reachable from the minikube node."""
+    if not public_domain:
+        return True
+
+    discovery_url = f"https://{public_domain}/auth/realms/EUCAIM-NODE/.well-known/openid-configuration"
+    print(f" Checking OIDC issuer reachability from minikube node: {discovery_url}")
+
+    http_code = cmd_output(
+        "minikube ssh -- '"
+        f"curl -k -sS -o /dev/null -w %{{http_code}} {shlex.quote(discovery_url)} 2>/dev/null || true"
+        "'"
+    ).strip().strip("'\"")
+
+    if http_code == "200":
+        print(" OIDC issuer endpoint is reachable (HTTP 200)")
+        return True
+
+    print(f"  OIDC issuer endpoint is not ready (HTTP {http_code or 'N/A'})")
+    print("  Continuing with kube-apiserver OIDC flag injection anyway")
+    return True
+
+
 def ensure_orthanc_wrapper_runtime(wrapper_dir: str) -> bool:
     """Install the Meteor server dependencies required by the extracted orthanc-wrapper bundle."""
     if not wrapper_dir or not os.path.isdir(wrapper_dir):
@@ -551,10 +688,13 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
     if not wrapper_dir or not os.path.isdir(wrapper_dir):
         return False
 
-    old_root_url = "https://node-demo.imaging.i3m.upv.es/wrapper"
     new_root_url = f"https://{public_domain}/wrapper"
-    old_domain_url = "https://node-demo.imaging.i3m.upv.es"
     new_domain_url = f"https://{public_domain}"
+
+    # Empty placeholders: "https:///wrapper" and "domainURL": "https://"
+    empty_root_url = "https:///wrapper"
+    empty_domain_url = '"domainURL": "https://"'
+    filled_domain_url = f'"domainURL": "https://{public_domain}"'
 
     changed = False
     for root, _dirs, files in os.walk(wrapper_dir):
@@ -570,10 +710,8 @@ def rewrite_orthanc_wrapper_app_json(wrapper_dir: str, public_domain: str) -> bo
             continue
 
         updated = content
-        updated = updated.replace(old_root_url, new_root_url)
-        updated = updated.replace(old_domain_url, new_domain_url)
-        updated = updated.replace("node-demo.imaging.i3m.upv.es", public_domain)
-        updated = updated.replace("node-demo", public_domain)
+        updated = updated.replace(empty_root_url, new_root_url)
+        updated = updated.replace(empty_domain_url, filled_domain_url)
 
         if updated != content:
             try:
@@ -620,6 +758,7 @@ class Auth_client_secrets():
         self.CLIENT_KUBERNETES_SECRET = existing_secrets.get('kubernetes', generate_random_password(32))
         self.CLIENT_KUBERNETES_OPERATOR_SECRET = existing_secrets.get('kubernetes-operator', generate_random_password(32))
         self.CLIENT_DESKTOPS_CLEANER_SECRET = existing_secrets.get('desktops-cleaner', generate_random_password(32))
+        self.CLIENT_ORTHANC_SECRET = existing_secrets.get('orthanc') or generate_random_password(32)
 
         if existing_secrets:
             print(f" Reusing existing client secrets to maintain consistency")
@@ -633,8 +772,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
     if USE_MINIKUBE:
         _kc_base = "/var/hostpath-provisioner/keycloak"
     else:
-        nfs_server = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
-        nfs_share = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip()
+        nfs_server, nfs_share = _nfs_server_base()
         if nfs_server and nfs_share:
             _kc_base = os.path.join(nfs_share, "keycloak")
             print(f" Using NFS base: {nfs_server}:{_kc_base}")
@@ -801,15 +939,14 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
         pv_docs  = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolume"]
         pvc_docs = [d for d in docs if isinstance(d, dict) and d.get("kind") == "PersistentVolumeClaim"]
 
-        # In K8s mode, detect NFS server from managed-nfs-storage StorageClass
+        # In K8s mode, resolve NFS endpoint (config override first, then StorageClass)
         nfs_server = None
         nfs_base = "/pv"
 
         if not USE_MINIKUBE:
-            nfs_info = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.server}}' 2>/dev/null").strip()
-            if nfs_info:
-                nfs_server = nfs_info
-                nfs_base = cmd_output(f"{KUBECTL} get sc managed-nfs-storage -o jsonpath='{{.parameters.share}}' 2>/dev/null").strip() or "/pv"
+            nfs_info = _nfs_server_base()
+            if nfs_info[0]:
+                nfs_server, nfs_base = nfs_info
                 print(f" Detected NFS server: {nfs_server}{nfs_base}")
 
         for d in pv_docs:
@@ -970,6 +1107,7 @@ def install_keycloak(auth_client_secrets: Auth_client_secrets):
                 l = l.replace("{{ CLIENT_KUBERNETES_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_SECRET)
                 l = l.replace("{{ CLIENT_KUBERNETES_OPERATOR_SECRET }}", auth_client_secrets.CLIENT_KUBERNETES_OPERATOR_SECRET)
                 l = l.replace("{{ CLIENT_DESKTOPS_CLEANER_SECRET }}", auth_client_secrets.CLIENT_DESKTOPS_CLEANER_SECRET)
+                l = l.replace("{{ CLIENT_ORTHANC_SECRET }}", auth_client_secrets.CLIENT_ORTHANC_SECRET)
                 fout.write(l)
 
     # Keep a copy in the repository root so next installer runs can reuse the same client secrets.
@@ -1288,8 +1426,18 @@ def create_dataset_service_pvcs():
     print("  Applying dataset-service PVC manifest (0-pvcs-hostpath.yaml) ...")
 
     pvcs_path = os.path.join(SCRIPT_DIR, "k8s-deploy-node", "dataset-service", "0-pvcs.yaml")
-    # Ensure namespace exists
-    cmd("minikube kubectl -- create namespace dataset-service || true")
+    # Ensure kube-apiserver is reachable before namespace/PVC operations.
+    wait_for_kube_apiserver(max_wait=300, interval=5, context="before dataset-service PVC setup")
+
+    # Ensure namespace exists (retry once with --validate=false when OpenAPI is not ready yet).
+    _ns_cmd = f"{KUBECTL} create namespace dataset-service --dry-run=client -o yaml | {KUBECTL} apply -f -"
+    _ns_ret = cmd(_ns_cmd, exit_on_error=False)
+    if _ns_ret != 0:
+        print("  Retrying dataset-service namespace apply with --validate=false...")
+        _ns_cmd_fallback = f"{KUBECTL} create namespace dataset-service --dry-run=client -o yaml | {KUBECTL} apply --validate=false -f -"
+        _ns_ret = cmd(_ns_cmd_fallback, exit_on_error=False)
+    if _ns_ret != 0:
+        print("  Warning: could not ensure dataset-service namespace yet")
 
     # Ensure all required storage directories exist before applying PVCs.
     # If they are missing, pods may fail with "no such file or directory"
@@ -1328,8 +1476,15 @@ def create_dataset_service_pvcs():
 
     _pv_path = _convert_hostpath_pvs_to_nfs(pvcs_path)
     print(f" Applying PV/PVC manifest: {_pv_path} to namespace dataset-service")
-    cmd(f"minikube kubectl -- apply -f {_pv_path} -n dataset-service")
-    cmd("minikube kubectl -- get pvc -n dataset-service")
+    _apply_ret = cmd(f"{KUBECTL} apply -f {_pv_path} -n dataset-service", exit_on_error=False)
+    if _apply_ret != 0:
+        print("  Retrying PV/PVC apply with --validate=false...")
+        _apply_ret = cmd(f"{KUBECTL} apply --validate=false -f {_pv_path} -n dataset-service", exit_on_error=False)
+    if _apply_ret != 0:
+        print("  Warning: failed to apply dataset-service PV/PVC manifest")
+        return False
+
+    cmd(f"{KUBECTL} get pvc -n dataset-service", exit_on_error=False)
     return True
 
 def install_dataset_service(auth_client_secret: str):
@@ -1343,10 +1498,11 @@ def install_dataset_service(auth_client_secret: str):
         db_service_file = "1-db-service.yaml"
         deployment_file = "2-dataset-service.yaml"
 
-        cmd("minikube kubectl -- create namespace dataset-service || true")
+        cmd(f"{KUBECTL} create namespace dataset-service || true", exit_on_error=False)
 
         # Create PVCs first (this will auto-create PVs)
-        create_dataset_service_pvcs()
+        if not create_dataset_service_pvcs():
+            raise RuntimeError("Could not apply dataset-service PVCs because kube-apiserver was unavailable")
 
         # Try to get the current kid from Keycloak JWKS
         print(f" Attempting to fetch current kid from Keycloak JWKS...")
@@ -1425,6 +1581,9 @@ def install_dataset_service(auth_client_secret: str):
                                     for key, value in config["self"].items():
                                         if isinstance(value, str) and value == "XXXXXXXX":
                                             config["self"][key] = generate_random_password(16)
+                                    # Shared fed-search token: inject the SAME value that
+                                    # fed-search will use in its api-keys secret.
+                                    config["self"]["eucaim_search_token"] = get_eucaim_search_token()
 
                                 if "auth" in config and "client" in config["auth"]:
                                     config["auth"]["client"]["client_secret"] = auth_client_secret
@@ -1481,27 +1640,28 @@ def install_dataset_service(auth_client_secret: str):
             print("Warning: Could not find DATASET_SERVICE_CONFIG to update password and tokens.")
 
         # Apply resources
-        # Ensure kube-apiserver is responsive before applying (it may have restarted for OIDC config)
-        print(f" Waiting for kube-apiserver to be ready before applying manifests...")
-        api_waited = 0
-        while api_waited < 120:
-            api_ok = cmd_output("minikube kubectl -- get --raw=/healthz 2>/dev/null").strip()
-            if api_ok == "ok":
-                print(f" API server ready")
-                break
-            time.sleep(5)
-            api_waited += 5
-            if api_waited % 20 == 0:
-                print(f"   Still waiting for API server... ({api_waited}s)")
-        else:
-            print(f"  Warning: API server may not be ready, proceeding anyway")
+        api_ready = wait_for_kube_apiserver(max_wait=300, interval=5, context="before dataset-service apply")
+        if not api_ready:
+            print("  Warning: API server is still unstable; applying with --validate=false fallback")
 
-        cmd(f"minikube kubectl -- apply -f {db_service_file} -n dataset-service")
-        cmd("minikube kubectl -- apply -f 0-service-account.yaml -n dataset-service")
+        _apply_db = cmd(f"{KUBECTL} apply -f {db_service_file} -n dataset-service", exit_on_error=False)
+        if _apply_db != 0:
+            print("  Retrying database manifest with --validate=false...")
+            cmd(f"{KUBECTL} apply --validate=false -f {db_service_file} -n dataset-service")
 
-        # Delete existing deployment to force recreation with new kid
+        _apply_sa = cmd(f"{KUBECTL} apply -f 0-service-account.yaml -n dataset-service", exit_on_error=False)
+        if _apply_sa != 0:
+            print("  Retrying service account manifest with --validate=false...")
+            cmd(f"{KUBECTL} apply --validate=false -f 0-service-account.yaml -n dataset-service")
+
+        # Delete existing deployment to force recreation with new kid.
+        # Clean up stale DSWS admission webhooks first: the DSWS operator webhook
+        # service is not running yet at this point in the install, and a leftover
+        # MutatingWebhookConfiguration would block this delete (connection refused).
+        print(" Cleaning up stale DSWS admission webhooks that could block deployment delete...")
+        cleanup_stale_dsws_webhooks()
         print(f"\n  Deleting existing dataset-service-backend deployment (if exists)...")
-        cmd("minikube kubectl -- delete deployment dataset-service-backend -n dataset-service --ignore-not-found=true")
+        cmd("minikube kubectl -- delete deployment dataset-service-backend -n dataset-service --ignore-not-found=true", exit_on_error=False)
 
         # Wait a moment for the deployment to be fully deleted
         print(f" Waiting for deployment deletion to complete...")
@@ -1509,7 +1669,10 @@ def install_dataset_service(auth_client_secret: str):
 
         # Apply the new deployment with updated configuration
         print(f" Creating new dataset-service-backend deployment with updated kid...")
-        cmd(f"minikube kubectl -- apply -f {deployment_file} -n dataset-service")
+        _apply_deploy = cmd(f"{KUBECTL} apply -f {deployment_file} -n dataset-service", exit_on_error=False)
+        if _apply_deploy != 0:
+            print("  Retrying deployment manifest with --validate=false...")
+            cmd(f"{KUBECTL} apply --validate=false -f {deployment_file} -n dataset-service")
 
         # Check if we should use Gateway API or traditional Ingress
         use_gateway_api = getattr(CONFIG, 'use_gateway_api', True)
@@ -2297,11 +2460,25 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     else:
         print(f" Service account token retrieved successfully")
 
+    # Build host homes path from config so K8s deployments do not keep minikube defaults.
+    host_homes_users_path = os.path.join(CONFIG.host_path, "data", "homes", "users")
+    default_homes_users_path = "/var/hostpath-provisioner/data/homes/users"
+    # In minikube the shared volume is mounted as /var/hostpath-provisioner INSIDE the VM;
+    # the host-side CONFIG.host_path (/home/ubuntu/minikube-data) is not visible to pods, so
+    # it must NOT be substituted into the job template. Only --k8s (NFS host_path) needs it.
+    apply_homes_path_replace = not USE_MINIKUBE
+
     # Read the template file
     with open(template_file, 'r') as f:
         content = f.read()
 
     # Replace all placeholders with actual values
+    kube_apiserver_endpoint = str(getattr(CONFIG, 'kubeapiserver_ip', '') or '').strip()
+    if not kube_apiserver_endpoint:
+        kube_apiserver_endpoint = 'kubernetes.default.svc:443'
+    if not kube_apiserver_endpoint.startswith('http://') and not kube_apiserver_endpoint.startswith('https://'):
+        kube_apiserver_endpoint = f'https://{kube_apiserver_endpoint}'
+
     replacements = {
         '__KEYCLOAK_TOKEN_ENDPOINT__': f'https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE/protocol/openid-connect/token',
         '__KEYCLOAK_ADMIN_ENDPOINT__': f'https://{CONFIG.public_domain}/auth/admin/realms/EUCAIM-NODE/',
@@ -2314,12 +2491,16 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
         '__EXTERNAL_SHARING_SERVICE_ENDPOINT__': 'http://external-sharing-service.external-sharing-service.svc.cluster.local:80',
         '__MAIN_DOMAIN_NAME__': CONFIG.public_domain,
         '__HARBOR_DOMAIN_NAME__': f'harbor.eucaim-node.i3m.upv.es',
-        '__K8S_ENDPOINT__': f'https://{get_node_ip()}:8443',
+        '__K8S_ENDPOINT__': kube_apiserver_endpoint,
         '__K8S_TOKEN__': k8s_token,
     }
 
     for placeholder, value in replacements.items():
         content = content.replace(placeholder, value)
+
+    # Replace hardcoded minikube homes path with host_path-based path (--k8s only).
+    if apply_homes_path_replace:
+        content = content.replace(default_homes_users_path, host_homes_users_path)
 
     # Write to the .private.yaml file
     with open(private_file, 'w') as f:
@@ -2343,6 +2524,14 @@ def configure_user_management_job_template(CONFIG, auth_client_secrets: Auth_cli
     cmd(f"sudo cp {scripts_src_dir}/*.sh {scripts_data_dir}/")
     cmd(f"sudo cp {scripts_src_dir}/*.py {scripts_data_dir}/")
     cmd(f"sudo cp -r {scripts_src_dir}/templates {scripts_data_dir}/templates")
+
+    if apply_homes_path_replace:
+        cmd(
+            f"sudo find {shlex.quote(on_event_jobs_data_dir)} -type f "
+            f"-name 'user-management-job-template.private.yaml' "
+            f"-exec sed -i 's#{default_homes_users_path}#{host_homes_users_path}#g' {{}} +"
+        )
+
     cmd(f"sudo chmod -R 755 {on_event_jobs_data_dir}")
     print(f" on-event-jobs files copied to: {on_event_jobs_data_dir}")
 
@@ -2453,8 +2642,24 @@ def install_dsws_operator(CONFIG, auth_client_secrets: Auth_client_secrets, guac
         # Disable node selection (minikube has a single node, no scheduling constraints needed)
         if 'k8s' not in data['operatorConfiguration']:
             data['operatorConfiguration']['k8s'] = {}
-        data['operatorConfiguration']['k8s']['node_selection'] = False
+
+        k8s_cfg = data['operatorConfiguration']['k8s']
+        k8s_cfg['node_selection'] = False
         print(f" Disabled node_selection in k8s configuration")
+
+        # Only change the volume paths requested for real K8s deployments.
+        if 'volumes' not in k8s_cfg:
+            k8s_cfg['volumes'] = {}
+        volumes = k8s_cfg['volumes']
+
+        if not USE_MINIKUBE:
+            volumes['datasets_path'] = '/pv/dataset-service/datasets'
+            volumes['persistent_homes_path'] = '/pv/data/homes/users'
+            volumes['persistent_shared_folder_path'] = '/pv/data/homes/shared-folder'
+            print(" Updated DSWS volume paths for cluster deployment")
+
+        volumes['datalake_path'] = ""
+        print(" Disabled DSWS datalake_path mount (k8s.volumes.datalake_path='')")
 
         # Save updated values
         with open(values_file, 'w') as f:
@@ -2486,12 +2691,12 @@ def configure_kube_apiserver_oidc(CONFIG):
         print(f"      1. Add --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE")
         print(f"      2. Add --oidc-client-id=kubernetes")
         print(f"      3. Add --oidc-username-claim=preferred_username")
-        print(f"      4. Add --oidc-username-prefix=oidc:")
+        print(f"      4. Add --oidc-username-prefix='oidc:'")
         print(f"      5. Add --oidc-groups-claim=groups")
-        print(f"      6. Add --oidc-groups-prefix=oidc:")
+        print(f"      6. Add --oidc-groups-prefix='oidc:'")
         print(f"    For kubeadm: edit /etc/kubernetes/manifests/kube-apiserver.yaml")
         print(f"    For managed K8s: use cloud provider's OIDC configuration API")
-        return
+        return True
 
     print(f"\n{'='*80}")
     print(" Configuring kube-apiserver with OIDC")
@@ -2544,107 +2749,193 @@ fi
         cmd("minikube ssh -- 'sudo bash /tmp/patch_token_auth.sh'")
         print(" kube-apiserver patched with --token-auth-file")
 
-    # OIDC configuration flags
-    oidc_flags = [
-        f'--oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE',
-        '--oidc-client-id=kubernetes',
-        '--oidc-username-claim=preferred_username',
-        "'--oidc-username-prefix=oidc:'",
-        '--oidc-groups-claim=groups',
-        "'--oidc-groups-prefix=oidc:'"
-    ]
+    # Try to reach the issuer first, but do not block the patch.
+    # The flags still need to be written so the apiserver can be reconciled once Keycloak comes up.
+    if not oidc_issuer_is_reachable(CONFIG.public_domain):
+        print(" Proceeding with OIDC flag injection anyway")
 
     # Check if OIDC is already configured
     print(" Checking current kube-apiserver configuration...")
-    check_oidc = cmd("minikube ssh -- 'sudo grep -q oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml && echo FOUND || echo NOT_FOUND'", exit_on_error=False)
-
-    if check_oidc == 0:
-        # Check output to see if OIDC is configured
-        output = cmd_output("minikube ssh -- 'sudo grep -q oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml && echo FOUND || echo NOT_FOUND'").strip()
-
-        if 'FOUND' in output:
-            # Check if it's the correct domain
-            current_domain = cmd_output(f"minikube ssh -- 'sudo grep oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml'").strip()
-
-            if CONFIG.public_domain in current_domain:
-                print(f" kube-apiserver already configured with OIDC for {CONFIG.public_domain}")
-                return
-            else:
-                print(f" Updating kube-apiserver OIDC configuration to use {CONFIG.public_domain}")
+    check_oidc = cmd_output(
+        "minikube ssh -- 'if sudo grep -q -- --oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml; then echo FOUND; else echo NOT_FOUND; fi'"
+    ).strip()
 
     print(f" Configuring kube-apiserver with OIDC for domain: {CONFIG.public_domain}")
 
-    # Create a bash script to modify the YAML in-place (avoids needing Python YAML library)
-    modify_script = f'''set -e
+    if check_oidc == 'FOUND':
+        current_domain = cmd_output(
+            "minikube ssh -- 'sudo grep -m 1 -- --oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml || true'"
+        ).strip()
+
+        if CONFIG.public_domain in current_domain:
+            print(f" kube-apiserver already configured with OIDC for {CONFIG.public_domain}")
+            if wait_for_kube_apiserver(max_wait=90, interval=5, context="with existing OIDC config"):
+                return True
+            print(" Existing OIDC config detected but kube-apiserver is unhealthy")
+            if rollback_kube_apiserver_oidc_flags():
+                print(" OIDC flags were rolled back to recover kube-apiserver")
+                return False
+            raise RuntimeError("kube-apiserver unhealthy and OIDC rollback failed")
+        else:
+            print(f" Updating kube-apiserver OIDC configuration to use {CONFIG.public_domain}")
+
+    # Create a bash script to modify the YAML in-place.
+    # IMPORTANT: K8s 1.33+ may have --authentication-config in the manifest.
+    # If present, --oidc-* flags are mutually exclusive and will crash the apiserver.
+    # In that case we generate an AuthenticationConfiguration file instead.
+    modify_script = f'''#!/bin/bash
+set -euo pipefail
 
 APISERVER_YAML="/etc/kubernetes/manifests/kube-apiserver.yaml"
-TEMP_YAML="/tmp/kube-apiserver-temp.yaml"
+TMP_YAML="$(mktemp)"
+RESULT_YAML="$(mktemp)"
+trap 'rm -f "$TMP_YAML" "$RESULT_YAML"' EXIT
 
-# Remove any existing OIDC flags first and save to temp file
-grep -v -- '--oidc-issuer-url' "$APISERVER_YAML" | \\
-grep -v -- '--oidc-client-id' | \\
-grep -v -- '--oidc-username-claim' | \\
-grep -v -- '--oidc-username-prefix' | \\
-grep -v -- '--oidc-groups-claim' | \\
-grep -v -- '--oidc-groups-prefix' > "$TEMP_YAML"
+if [ ! -f "$APISERVER_YAML" ]; then
+    echo "Missing kube-apiserver manifest: $APISERVER_YAML" >&2
+    exit 1
+fi
 
-# Find the line with --tls-private-key-file and insert OIDC flags after it
-awk '{{
-    print $0
-    if ($0 ~ /--tls-private-key-file/) {{
+# Check if --authentication-config is already in the manifest (K8s 1.33+).
+# If so, --oidc-* flags are mutually exclusive and MUST NOT be added.
+if grep -q -- '--authentication-config' "$APISERVER_YAML"; then
+    echo "DETECTED_AUTH_CONFIG"
+    exit 0
+fi
+
+# Remove any existing OIDC flags first (|| true: grep -v exits 1 if no lines remain).
+grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "$TMP_YAML" || true
+
+# Insert the required flags immediately after the TLS key-file entry.
+# Write to a temp file first, then move atomically to avoid truncation on failure.
+awk '
+BEGIN {{ found=0 }}
+/--tls-private-key-file/ {{
+    print
         print "    - --oidc-issuer-url=https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
         print "    - --oidc-client-id=kubernetes"
         print "    - --oidc-username-claim=preferred_username"
         print "    - \\"--oidc-username-prefix=oidc:\\""
         print "    - --oidc-groups-claim=groups"
         print "    - \\"--oidc-groups-prefix=oidc:\\""
+    found=1
+    next
+}}
+{{ print }}
+END {{
+    if (!found) {{
+        print "ERROR: --tls-private-key-file not found in kube-apiserver manifest" > "/dev/stderr"
+        exit 1
     }}
-}}' "$TEMP_YAML" > "$APISERVER_YAML"
+}}
+' "$TMP_YAML" > "$RESULT_YAML"
 
-# Clean up
-rm -f "$TEMP_YAML"
-
-echo "OIDC configuration applied successfully"
+# Only overwrite the manifest if awk succeeded (RESULT_YAML is non-empty).
+if [ -s "$RESULT_YAML" ]; then
+    cp "$RESULT_YAML" "$APISERVER_YAML"
+    echo "OIDC flags (--oidc-*) applied successfully"
+else
+    echo "ERROR: awk produced empty output, manifest NOT modified" >&2
+    exit 1
+fi
 '''
 
     # Write script to temp file
     with open('/tmp/modify_apiserver.sh', 'w') as f:
         f.write(modify_script)
 
+    # Backup apiserver manifest so we can rollback if OIDC flags prevent startup.
+    cmd("minikube ssh -- 'sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/kube-apiserver.yaml.pre-oidc.bak'", exit_on_error=False)
+
     # Copy script to minikube
     cmd("minikube cp /tmp/modify_apiserver.sh minikube:/tmp/modify_apiserver.sh")
 
-    # Run the script by piping it to bash (avoids permission issues with /tmp)
+    # Run the script and capture output to detect --authentication-config presence.
     print(" Modifying kube-apiserver.yaml...")
-    cmd("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
+    script_output = cmd_output("minikube ssh -- 'sudo bash /tmp/modify_apiserver.sh'")
 
-    # Wait for apiserver to restart (it monitors the manifest file)
-    print(" Waiting for kube-apiserver to restart with new configuration...")
-    print("  (This may take 30-60 seconds)")
-    time.sleep(10)
+    if "DETECTED_AUTH_CONFIG" in script_output:
+        # K8s 1.33+ with --authentication-config already present.
+        # --oidc-* flags are mutually exclusive; use structured auth config file instead.
+        print(" Detected --authentication-config in kube-apiserver manifest (K8s 1.33+).")
+        print(" Using AuthenticationConfiguration file instead of --oidc-* flags...")
+        _configure_oidc_via_authentication_config(CONFIG)
+    else:
+        # Used --oidc-* flags; wait for apiserver restart.
+        if not wait_for_kube_apiserver(max_wait=300, interval=5, context="after OIDC patch"):
+            print(" OIDC patch appears to have broken kube-apiserver startup. Rolling back manifest...")
+            if rollback_kube_apiserver_oidc_flags():
+                print(" OIDC configuration was rolled back because kube-apiserver did not recover")
+                return False
+            raise RuntimeError("kube-apiserver did not recover after OIDC rollback")
 
-    # Wait for apiserver to be ready
-    max_wait = 180
-    waited = 0
-    while waited < max_wait:
-        result = cmd("minikube kubectl -- get --raw=/healthz 2>/dev/null", exit_on_error=False)
-        if result == 0:
-            print(f" kube-apiserver is ready with OIDC configuration")
-            break
-        time.sleep(5)
-        waited += 5
-        if waited % 15 == 0:
-            print(f"   Still waiting for apiserver... ({waited}s)")
-
-    if waited >= max_wait:
-        print(f"  Warning: apiserver took longer than expected to restart")
-        print(f"   You may need to check manually with: kubectl get pods -n kube-system")
-
-    # Verify OIDC configuration
-    print("\n Verifying OIDC configuration...")
-    cmd("minikube ssh -- 'sudo grep oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml'")
+        # Verify OIDC configuration
+        print("\n Verifying OIDC configuration...")
+        cmd("minikube ssh -- 'sudo grep oidc-issuer-url /etc/kubernetes/manifests/kube-apiserver.yaml'")
 
     print(f"\n kube-apiserver configured successfully with OIDC!")
+    return True
+
+
+def _configure_oidc_via_authentication_config(CONFIG):
+    """Configure OIDC via --authentication-config file (K8s 1.33+ compatible)."""
+    issuer_url = f"https://{CONFIG.public_domain}/auth/realms/EUCAIM-NODE"
+
+    auth_config_yaml = f"""apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+- issuer:
+    url: {issuer_url}
+  claimMappings:
+    username:
+      claim: preferred_username
+      prefix: "oidc:"
+    groups:
+      claim: groups
+      prefix: "oidc:"
+  audiences:
+  - kubernetes
+"""
+    with open('/tmp/auth-config.yaml', 'w') as f:
+        f.write(auth_config_yaml)
+    print(f" Generated AuthenticationConfiguration at /tmp/auth-config.yaml")
+
+    cmd("minikube cp /tmp/auth-config.yaml minikube:/tmp/auth-config.yaml")
+
+    # Backup apiserver manifest before modifying
+    cmd("minikube ssh -- 'sudo cp /etc/kubernetes/manifests/kube-apiserver.yaml /tmp/kube-apiserver.yaml.pre-auth-config.bak'", exit_on_error=False)
+
+    # Add --authentication-config flag to the manifest.
+    # If --oidc-* flags exist, remove them first (they conflict).
+    patch_script = r"""#!/bin/bash
+set -euo pipefail
+APISERVER_YAML=/etc/kubernetes/manifests/kube-apiserver.yaml
+# Remove any legacy --oidc-* flags (conflict with --authentication-config).
+grep -vE -- '--oidc-(issuer-url|client-id|username-claim|username-prefix|groups-claim|groups-prefix)' "$APISERVER_YAML" > "${APISERVER_YAML}.tmp" || true
+mv "${APISERVER_YAML}.tmp" "$APISERVER_YAML"
+# Add --authentication-config if not already present.
+if ! grep -q -- '--authentication-config' "$APISERVER_YAML"; then
+    sed -i '/--tls-private-key-file/a\    - --authentication-config=/tmp/auth-config.yaml' "$APISERVER_YAML"
+    echo "--authentication-config added"
+else
+    echo "--authentication-config already present"
+fi
+"""
+    with open('/tmp/patch_auth_config.sh', 'w') as f:
+        f.write(patch_script)
+    cmd("minikube cp /tmp/patch_auth_config.sh minikube:/tmp/patch_auth_config.sh")
+    cmd("minikube ssh -- 'sudo bash /tmp/patch_auth_config.sh'")
+
+    if not wait_for_kube_apiserver(max_wait=300, interval=5, context="after --authentication-config patch"):
+        print(" Authentication-config patch appears to have broken kube-apiserver. Rolling back...")
+        cmd("minikube ssh -- 'if [ -f /tmp/kube-apiserver.yaml.pre-auth-config.bak ]; then sudo cp /tmp/kube-apiserver.yaml.pre-auth-config.bak /etc/kubernetes/manifests/kube-apiserver.yaml; fi'", exit_on_error=False)
+        if wait_for_kube_apiserver(max_wait=240, interval=5, context="after auth-config rollback"):
+            print(" Rolled back to original kube-apiserver manifest")
+            return False
+        raise RuntimeError("kube-apiserver did not recover after auth-config rollback")
+
+    print("\n Verifying authentication-config...")
+    cmd("minikube ssh -- 'sudo grep authentication-config /etc/kubernetes/manifests/kube-apiserver.yaml'")
 
 def install_kubeapps(CONFIG, client_kubernetes_secret: str):
     '''Install Kubeapps dashboard for managing Helm charts'''
@@ -3990,16 +4281,66 @@ def install_fed_search(CONFIG):
 
         provider     = CONFIG.focus.provider
         broker_url   = CONFIG.focus.beam_broker_url
+        cn_domain    = getattr(CONFIG.focus, 'cn_domain', '') or ''
+
+        # --- Generate/refresh this node's beam-proxy private key + CSR ---
+        # proxy_private_key_pem is an OUTPUT file path. If empty or the file is
+        # missing, openssl creates a fresh key and the matching CSR, which the
+        # node administrator must send to the central EUCAIM server.
+        certs_out_dir = os.path.join(SCRIPT_DIR, "certs", "fed-search")
+        try:
+            os.makedirs(certs_out_dir, exist_ok=True)
+        except Exception:
+            pass
+        key_file = (getattr(CONFIG.focus, 'proxy_private_key_pem', '') or '').strip()
+        if not key_file:
+            key_file = os.path.join(certs_out_dir, 'proxy.priv.pem')
+        key_file = os.path.abspath(os.path.expanduser(key_file))
+        csr_file = os.path.join(os.path.dirname(key_file), f'{provider}.csr')
+
+        if not os.path.isfile(key_file):
+            try:
+                os.makedirs(os.path.dirname(key_file), exist_ok=True)
+            except Exception:
+                pass
+            print(" Generating beam-proxy private key (openssl genrsa)...")
+            _gens = cmd_output(f"openssl genrsa -out {shlex.quote(key_file)} 2048 2>&1").strip()
+            if not os.path.isfile(key_file):
+                print("  WARNING: could not generate private key with openssl.")
+                print(f"  Try manually: openssl genrsa -out {key_file} 2048")
+                print("  Beam-proxy pod will fail until key + secret are created manually.")
+                _key_available = False
+            else:
+                os.chmod(key_file, 0o600)
+                _key_available = True
+        else:
+            _key_available = True
+
+        if _key_available:
+            if not os.path.isfile(csr_file):
+                print(" Generating beam-proxy CSR...")
+                subject = f'/CN={provider}.broker.eucaim.cancerimage.eu{cn_domain}'
+                cmd(f"openssl req -key {shlex.quote(key_file)} -new "
+                    f"-subj {shlex.quote(subject)} -out {shlex.quote(csr_file)}")
+            if os.path.isfile(csr_file):
+                print(f" Beam-proxy CSR ready: {csr_file}")
+                print(f"   Subject: /CN={provider}.broker.eucaim.cancerimage.eu{cn_domain}")
+            else:
+                print("  WARNING: failed to generate CSR.")
 
         # Create namespace
         cmd("minikube kubectl -- create namespace federated-search --dry-run=client -o yaml | minikube kubectl -- apply -f -")
 
         # --- Secret: api-keys (used by focus deployment) ---
+        # Header is derived from the shared eucaim_search_token so it matches the
+        # self.eucaim_search_token injected into the dataset-service config.
+        _eucaim_token = get_eucaim_search_token()
+        _auth_header = f"Secret {_eucaim_token}"
         cmd(
             f"minikube kubectl -- create secret generic api-keys"
             f" --namespace federated-search"
             f" --from-literal=FOCUS_API_KEY={CONFIG.focus.focus_api_key}"
-            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='Secret {CONFIG.focus.dataset_service_auth_header}'"
+            f" --from-literal=DATASET_SERVICE_AUTH_HEADER='{_auth_header if _auth_header else f'Secret {CONFIG.focus.dataset_service_auth_header}'}'"
             f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
         )
         print(" Secret 'api-keys' applied")
@@ -4014,51 +4355,59 @@ def install_fed_search(CONFIG):
         print(" Secret 'spot-beam-secret' applied")
 
         # --- Secret: root-crt-pem (projected volume in beam-proxy pod) ---
-        root_cert_file = "/tmp/root-crt-pem.pem"
-        with open(root_cert_file, "w") as f:
-            f.write(CONFIG.focus.root_crt_pem)
-        cmd(
-            f"minikube kubectl -- create secret generic root-crt-pem"
-            f" --namespace federated-search"
-            f" --from-file=root.crt.pem={root_cert_file}"
-            f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
-        )
-        import os as _os
-        _os.remove(root_cert_file)
-        print(" Secret 'root-crt-pem' applied")
+        # root_crt_pem is now the NAME of the file containing the broker root CA.
+        # A legacy inline PEM value is still accepted.
+        root_raw = (getattr(CONFIG.focus, 'root_crt_pem', '') or '')
+        if root_raw.lstrip().startswith('-----BEGIN'):
+            root_cert_file = "/tmp/root-crt-pem.pem"
+            with open(root_cert_file, "w") as f:
+                f.write(root_raw)
+        else:
+            root_cert_file = os.path.abspath(os.path.expanduser(root_raw.strip())) if root_raw.strip() else ""
+        if root_cert_file and os.path.isfile(root_cert_file):
+            cmd(
+                f"minikube kubectl -- create secret generic root-crt-pem"
+                f" --namespace federated-search"
+                f" --from-file=root.crt.pem={shlex.quote(root_cert_file)}"
+                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
+            )
+            print(" Secret 'root-crt-pem' applied")
+        else:
+            print(f"  WARNING: broker root CA file not found at '{root_cert_file}'. "
+                  "Fill certs/fed-search/beam-root-ca.pem (or set focus.root_crt_pem) "
+                  "or beam-proxy will fail TLS verification.")
+        if root_raw.lstrip().startswith('-----BEGIN'):
+            try:
+                os.remove("/tmp/root-crt-pem.pem")
+            except OSError:
+                pass
 
         # --- Secret: private key (skip if secret already exists - user manages it manually) ---
-        proxy_private_key_pem = getattr(CONFIG.focus, 'proxy_private_key_pem', '')
-        if proxy_private_key_pem:
-            _priv_secret_name = "certs"
-            try:
-                with open("beam.yaml") as _f:
-                    import re as _re
-                    _m = _re.search(r'secret:\s*\n\s+name:\s+(\S+)', _f.read())
-                    if _m:
-                        _priv_secret_name = _m.group(1)
-            except Exception:
-                pass
-            _exists = cmd(
-                f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search 2>/dev/null",
-                exit_on_error=False,
+        _priv_secret_name = "certs"
+        try:
+            with open("beam.yaml") as _f:
+                import re as _re
+                _m = _re.search(r'secret:\s*\n\s+name:\s+(\S+)', _f.read())
+                if _m:
+                    _priv_secret_name = _m.group(1)
+        except Exception:
+            pass
+        _exists = cmd(
+            f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search 2>/dev/null",
+            exit_on_error=False,
+        )
+        if _exists == 0:
+            print(f" Secret '{_priv_secret_name}' already exists, skipping.")
+        elif _key_available:
+            cmd(
+                f"minikube kubectl -- create secret generic {_priv_secret_name}"
+                f" --namespace federated-search"
+                f" --from-file=proxy.pem={shlex.quote(key_file)}"
+                f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
             )
-            if _exists == 0:
-                print(f" Secret '{_priv_secret_name}' already exists, skipping.")
-            else:
-                privkey_file = "/tmp/beam-privkey.pem"
-                with open(privkey_file, "w") as f:
-                    f.write(proxy_private_key_pem)
-                cmd(
-                    f"minikube kubectl -- create secret generic {_priv_secret_name}"
-                    f" --namespace federated-search"
-                    f" --from-file=proxy.pem={privkey_file}"
-                    f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
-                )
-                import os as _os2; _os2.remove(privkey_file)
-                print(f" Secret '{_priv_secret_name}' created")
+            print(f" Secret '{_priv_secret_name}' created from {key_file}")
         else:
-            print("  WARNING: 'focus.proxy_private_key_pem' not set in config.")
+            print("  WARNING: 'focus.proxy_private_key_pem' not set and key generation failed.")
             print("  Beam-proxy pod will fail until this secret is created manually.")
 
         # --- Focus deployment ---
@@ -4100,6 +4449,18 @@ def install_fed_search(CONFIG):
         print(f"   Beam app ID: focus.{provider}.broker.eucaim.cancerimage.eu")
         print(f"   Broker: {broker_url}")
 
+        if os.path.isfile(csr_file):
+            print("\n" + "="*80)
+            print(" IMPORTANT: send the beam-proxy CSR to the central EUCAIM server:")
+            print("="*80)
+            print(f"   CSR file (to send):  {csr_file}")
+            print(f"   Private key (keep local, do NOT send): {key_file}")
+            print(f"   Subject: /CN={provider}.broker.eucaim.cancerimage.eu{cn_domain}")
+            print(f"   Send {shlex.quote(os.path.basename(csr_file))} to the EUCAIM central broker")
+            print("   administrators to obtain this node's signed certificate.")
+            print("   The federated search will not fully work until the certificate")
+            print("   returned by the central server is deployed to the beam-proxy pod.")
+
     finally:
         os.chdir(prev_dir)
 
@@ -4134,7 +4495,7 @@ def install_jobman_service(CONFIG, auth_client_secrets: Auth_client_secrets):
         webservice_content = webservice_content.replace('target: 8080', 'targetPort: 8080')
 
         # Read and process settings.json template
-        settings_template_file = os.path.join(os.path.expanduser("~"), "mini-node", "jobman-settings.json")
+        settings_template_file = os.path.join(SCRIPT_DIR, "jobman-settings.json")
         if os.path.exists(settings_template_file):
             with open(settings_template_file, 'r') as f:
                 settings_content = f.read()
@@ -4280,7 +4641,7 @@ def apply_pod_priorities():
 
     print(f" Pod priority classes applied successfully")
 
-def install_orthanc(CONFIG):
+def install_orthanc(CONFIG, auth_client_secrets=None):
     '''Install Orthanc PACS server - uses dataset-service namespace and shares datalake-data PVC'''
     print(f"\n{'='*80}")
     print(" Installing Orthanc PACS Server")
@@ -4297,7 +4658,7 @@ def install_orthanc(CONFIG):
 
         # Create all host directories for PVs
         print(" Creating host directories for PVs...")
-        for subdir in ["orthanc-storage", "orthanc-db", "keycloak-db", "orthanc-wrapper"]:
+        for subdir in ["orthanc-storage", "orthanc-db", "keycloak-db", "wrapper"]:
             cmd(f"minikube ssh -- 'sudo mkdir -p /var/hostpath-provisioner/orthanc/{subdir}'")
         cmd("minikube ssh -- 'sudo chmod -R 777 /var/hostpath-provisioner/orthanc'")
         # Populate orthanc-wrapper payload from fixed tar file in repo.
@@ -4310,17 +4671,12 @@ def install_orthanc(CONFIG):
             wrapper_source_dir = os.path.join(orthanc_dir, "orthanc-wrapper")
         if USE_MINIKUBE:
             wrapper_host_dir = "/var/hostpath-provisioner/orthanc/orthanc-wrapper"
-            legacy_wrapper_host_dir = "/var/hostpath-provisioner/orthanc/wrapper"
         else:
             _nfs_server, _nfs_base = _nfs_server_base()
             if _nfs_base:
                 wrapper_host_dir = os.path.join(_nfs_base, "orthanc", "orthanc-wrapper")
             else:
                 wrapper_host_dir = os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
-            legacy_wrapper_host_dir = os.path.join(os.path.dirname(wrapper_host_dir), "wrapper")
-
-        if os.path.isdir(legacy_wrapper_host_dir) and not os.path.isdir(wrapper_host_dir):
-            wrapper_host_dir = legacy_wrapper_host_dir
 
         wrapper_payload_available = False
 
@@ -4328,37 +4684,49 @@ def install_orthanc(CONFIG):
             wrapper_tar = "/tmp/orthanc-wrapper-seed.tar.gz"
             if os.path.isfile(wrapper_repo_tar):
                 print(f" Found orthanc-wrapper payload tar: {wrapper_repo_tar}")
-                cmd(f"minikube cp {shlex.quote(wrapper_repo_tar)} minikube:{wrapper_tar}")
+                # Build a merged seed on the HOST: extract the repo tar, overlay
+                # the wrapper source files (app.json, init_node.sh, ...), then
+                # re-tar. The VM cannot see host-local paths (wrapper_source_dir)
+                # inside `minikube ssh`, so the merge must happen before pushing.
+                seed_dir = "/tmp/orthanc-wrapper-seed"
+                shutil.rmtree(seed_dir, ignore_errors=True)
+                os.makedirs(seed_dir, exist_ok=True)
+                print(" Extracting orthanc-wrapper tar for merge...")
+                cmd(f"tar -xzf {shlex.quote(wrapper_repo_tar)} -C {shlex.quote(seed_dir)}")
+                seed_src = seed_dir
+                wrapper_sub = os.path.join(seed_dir, "wrapper")
+                if os.path.isdir(wrapper_sub) and os.listdir(wrapper_sub):
+                    seed_src = wrapper_sub
+                if os.path.isdir(wrapper_source_dir):
+                    src_abs = os.path.abspath(wrapper_source_dir)
+                    dst_abs = os.path.abspath(seed_src)
+                    if src_abs != dst_abs:
+                        print(f" Overlaying wrapper source files from {wrapper_source_dir} into seed...")
+                        cmd(f"cp -a {shlex.quote(src_abs)}/. {shlex.quote(dst_abs)}/")
+                    overlay_tar = os.path.join(dst_abs, "orthanc-wrapper.tar.gz")
+                    if os.path.isfile(overlay_tar) and os.path.abspath(overlay_tar) != os.path.abspath(wrapper_repo_tar):
+                        os.remove(overlay_tar)
+                merged_tar = "/tmp/orthanc-wrapper-merged.tar.gz"
+                cmd(
+                    f"tar -czf {shlex.quote(merged_tar)} "
+                    f"-C {shlex.quote(os.path.dirname(seed_src))} {shlex.quote(os.path.basename(seed_src))}"
+                )
+                cmd(f"minikube cp {shlex.quote(merged_tar)} minikube:{wrapper_tar}")
                 cmd(
                     "minikube ssh -- '"
                     "set -e; "
                     "TARGET=/var/hostpath-provisioner/orthanc/orthanc-wrapper; "
-                    "TMP=/tmp/orthanc-wrapper-seed-unpack; "
-                    "REPO_SRC=" + shlex.quote(wrapper_source_dir) + "; "
                     "sudo mkdir -p $TARGET; "
-                    "sudo rm -rf $TMP; "
-                    "sudo mkdir -p $TMP; "
-                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TMP; "
-                    "if [ -d \"$TMP/wrapper\" ] && [ -n \"$(find $TMP/wrapper -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
-                    "  SRC=$TMP/wrapper; "
-                    "elif [ -f $TMP/init_node.sh ] || [ -f $TMP/app.json ] || [ -f $TMP/restart_node_server.sh ] || [ -f $TMP/update_app.sh ]; then "
-                    "  SRC=$TMP; "
-                    "elif [ -d \"$TMP/bundle\" ] && [ -n \"$(find $TMP/bundle -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
-                    "  SRC=$TMP; "
-                    "else "
-                    "  FOUND=$(sudo find $TMP -maxdepth 4 -type f \( -name init_node.sh -o -name app.json -o -name restart_node_server.sh -o -name update_app.sh \) | head -n1); "
-                    "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
-                    "fi; "
                     "sudo rm -rf $TARGET/*; "
-                    "sudo cp -a $SRC/. $TARGET/; "
-                    "if [ -d \"$REPO_SRC\" ]; then sudo cp -a \"$REPO_SRC\"/. \"$TARGET\"/; fi; "
+                    "sudo tar -xzf /tmp/orthanc-wrapper-seed.tar.gz -C $TARGET --strip-components=1; "
                     "sudo chmod +x $TARGET/init_node.sh 2>/dev/null || true; "
                     "sudo chmod +x $TARGET/restart_node_server.sh 2>/dev/null || true; "
                     "sudo chmod +x $TARGET/update_app.sh 2>/dev/null || true; "
                     "sudo chmod -R 755 $TARGET'"
                 )
-                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz", exit_on_error=False)
-                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz; sudo rm -rf /tmp/orthanc-wrapper-seed-unpack'", exit_on_error=False)
+                cmd("rm -f /tmp/orthanc-wrapper-seed.tar.gz /tmp/orthanc-wrapper-merged.tar.gz", exit_on_error=False)
+                shutil.rmtree(seed_dir, ignore_errors=True)
+                cmd("minikube ssh -- 'sudo rm -f /tmp/orthanc-wrapper-seed.tar.gz'", exit_on_error=False)
             else:
                 print(
                     "  Warning: orthanc-wrapper payload not found. "
@@ -4414,7 +4782,27 @@ def install_orthanc(CONFIG):
                         "  Warning: @meteorjs/reify runtime not found after bootstrap; "
                         "orthanc-wrapper may still fail with missing module errors"
                     )
-                rewrite_orthanc_wrapper_app_json("/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain)
+                wrapper_host_side_dir = os.path.abspath(os.path.expanduser(
+                    os.path.join(CONFIG.host_path, "orthanc", "orthanc-wrapper")
+                ))
+                wrapper_rewritten = rewrite_orthanc_wrapper_app_json(wrapper_host_side_dir, CONFIG.public_domain)
+                if not wrapper_rewritten and wrapper_host_side_dir != "/var/hostpath-provisioner/orthanc/orthanc-wrapper":
+                    wrapper_rewritten = rewrite_orthanc_wrapper_app_json(
+                        "/var/hostpath-provisioner/orthanc/orthanc-wrapper", CONFIG.public_domain
+                    )
+                # Fallback: rewrite inside the VM via sed, covering both the
+                # legacy "node-demo" references and the empty placeholders
+                # ("https:///wrapper", "domainURL": "https://").
+                _wrapper_domain = CONFIG.public_domain
+                cmd(
+                    "minikube ssh -- 'sudo sed -i "
+                    f"\"s|https:///wrapper|https://{_wrapper_domain}/wrapper|g; "
+                    f"s|\\\"domainURL\\\": \\\"https://\\\"|\\\"domainURL\\\": \\\"https://{_wrapper_domain}\\\"|g; "
+                    f"s|node-demo.imaging.i3m.upv.es|{_wrapper_domain}|g\" "
+                    "/var/hostpath-provisioner/orthanc/orthanc-wrapper/app.json "
+                    "2>/dev/null || true'",
+                    exit_on_error=False,
+                )
         elif os.path.isfile(wrapper_repo_tar):
             print(" Installing orthanc-wrapper payload (K8s mode)...")
             copy_ret = cmd(
@@ -4429,7 +4817,7 @@ def install_orthanc(CONFIG):
                 "elif [ -d \"$TMP/bundle\" ] && [ -n \"$(find \"$TMP/bundle\" -maxdepth 1 -mindepth 1 -print -quit 2>/dev/null)\" ]; then "
                 "  SRC=$TMP; "
                 "else "
-                "  FOUND=$(find \"$TMP\" -maxdepth 4 -type f \( -name init_node.sh -o -name app.json -o -name restart_node_server.sh -o -name update_app.sh \) | head -n1); "
+                "  FOUND=$(find \"$TMP\" -maxdepth 4 -type f \\( -name init_node.sh -o -name app.json -o -name restart_node_server.sh -o -name update_app.sh \\) | head -n1); "
                 "  if [ -n \"$FOUND\" ]; then SRC=$(dirname \"$FOUND\"); else SRC=$TMP; fi; "
                 "fi; "
                 "rm -rf \"$TARGET\"/*; cp -a \"$SRC\"/. \"$TARGET\"/; "
@@ -4520,7 +4908,9 @@ def install_orthanc(CONFIG):
             db_keycloak_password_q = shlex.quote(oc.db_keycloak_password or '')
             kc_admin_user_q = shlex.quote(oc.kc_admin_user or '')
             kc_admin_password_q = shlex.quote(oc.kc_admin_password or '')
-            kc_client_secret_q = shlex.quote(oc.kc_client_secret or '')
+            kc_client_secret_q = shlex.quote(
+                auth_client_secrets.CLIENT_ORTHANC_SECRET if auth_client_secrets is not None else ''
+            )
             svc_user_q = shlex.quote(svc_user)
             svc_pw_q = shlex.quote(svc_pw)
             users_json_q = shlex.quote(users_json)
@@ -4636,12 +5026,12 @@ def install_orthanc(CONFIG):
                 "     /var/lib/orthanc  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
                 " | sudo tee -a /etc/fstab > /dev/null'")
 
-            # 2. /mnt/datalake → datalake storage_link with symlinks resolved (for desktops/jobman)
-            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/dataset-service/datalake/storage_link'")
+            # 2. /mnt/datalake → Orthanc storage_link with symlinks resolved (for desktops/jobman)
+            cmd("minikube ssh -- 'sudo mkdir -p /mnt/datalake /var/hostpath-provisioner/orthanc/orthanc-storage/storage_link'")
             cmd("minikube ssh -- '"
                 "sudo sed -i \"/mnt\\/datalake/d\" /etc/fstab && "
-                "printf \"/var/hostpath-provisioner/dataset-service/datalake/storage_link"
-                "     /mnt/datalake  fuse.bindfs  nouser,ro,resolve-symlinks,perms=o+rD  0  2\\n\""
+                "printf \"/var/hostpath-provisioner/orthanc/orthanc-storage/storage_link"
+                "     /mnt/datalake  fuse.bindfs  ro,resolve-symlinks,perms=o+rD,dev,suid  0  2\\n\""
                 " | sudo tee -a /etc/fstab > /dev/null'")
 
             # 3. /mnt/datasets → datasets (for desktops/jobman)
@@ -4660,8 +5050,9 @@ def install_orthanc(CONFIG):
         else:
             hp = CONFIG.host_path.rstrip('/')
             datalake_candidates = [
-                f"{hp}/dataset-service/datalake/storage_link",
+                f"{hp}/orthanc/orthanc-storage/storage_link",
                 f"{hp}/dataset-service/dataset-service-data/datalake/storage_link",
+                f"{hp}/dataset-service/datalake/storage_link",
                 f"{hp}/dataset-service/datasets/storage_link",
                 f"{hp}/dataset-service/datasets",
             ]
@@ -4672,6 +5063,7 @@ def install_orthanc(CONFIG):
             cmd("sudo mkdir -p /mnt /mnt/datalake /mnt/datasets /var/lib/orthanc", exit_on_error=False)
             for d in [
                 f"{hp}/orthanc/orthanc-storage",
+                f"{hp}/orthanc/orthanc-storage/storage_link",
                 f"{hp}/dataset-service/datalake/storage_link",
                 f"{hp}/dataset-service/datasets",
             ]:
@@ -4680,7 +5072,7 @@ def install_orthanc(CONFIG):
             print(" SKIP bindfs auto-mount (K8s mode)")
             print("  >> ADMIN: run these on EACH cluster node and persist in /etc/fstab:")
             print(f"      bindfs {hp}/orthanc/orthanc-storage /var/lib/orthanc -o nouser,ro,resolve-symlinks,perms=o+rD")
-            print(f"      bindfs {datalake_src} /mnt/datalake -o nouser,ro,resolve-symlinks,perms=o+rD")
+            print(f"      bindfs {datalake_src} /mnt/datalake -o ro,resolve-symlinks,perms=o+rD,dev,suid")
             print(f"      bindfs {datasets_src} /mnt/datasets -o nouser,ro,resolve-symlinks,perms=o+rD")
 
         print(f" Orthanc installation completed")
@@ -4941,6 +5333,9 @@ def install(flavor):
     print(f" Configuration loaded from: {DEFAULT_CONFIG_FILE_PATH}")
     print(f" Domain: {CONFIG.public_domain}")
 
+    # In --k8s mode, ensure NFS-backed host_path roots (e.g. /pv) are mounted and persistent.
+    ensure_nfs_hostpath_mount(CONFIG)
+
     # Check if Gateway API should be used (default: False for backward compatibility)
     use_gateway_api = getattr(CONFIG, 'use_gateway_api', False)
 
@@ -5027,7 +5422,13 @@ def install(flavor):
     create_platform_admin_user(auth_client_secrets)
 
     # Configure kube-apiserver with OIDC - done AFTER Keycloak so the OIDC issuer URL is reachable
-    configure_kube_apiserver_oidc(CONFIG)
+    try:
+        oidc_applied = configure_kube_apiserver_oidc(CONFIG)
+    except Exception as e:
+        oidc_applied = False
+        print(f"  Warning: kube-apiserver OIDC configuration failed: {e}")
+    if not oidc_applied:
+        print("  Continuing without OIDC on kube-apiserver (configuration was skipped or rolled back)")
 
     # Clinical Data SQL DB is installed in all flavors
     install_clinical_data_sql_db()
@@ -5047,7 +5448,7 @@ def install(flavor):
 
     # Orthanc PACS server is installed in micro, mini and standard flavors
     if flavor in ["micro", "mini", "standard"]:
-        install_orthanc(CONFIG)
+        install_orthanc(CONFIG, auth_client_secrets)
 
     # Configure user management job template (requires guacamole to be installed)
     if flavor in ["micro", "mini", "standard"]:
@@ -5117,6 +5518,24 @@ def install(flavor):
     if flavor in ["micro", "standard"]:
         print(f" Guacamole: https://{CONFIG.public_domain}/guacamole")
         print(f" Kubeapps: https://{CONFIG.public_domain}/apps/")
+
+    # Final federated-search reminder: the user must send the CSR to the central server.
+    if hasattr(CONFIG, 'focus') and flavor in ["mini", "standard"]:
+        try:
+            _csr = os.path.join(
+                os.path.dirname(getattr(CONFIG.focus, 'proxy_private_key_pem', '') or os.path.join(SCRIPT_DIR, "certs", "fed-search", "proxy.priv.pem")),
+                f'{CONFIG.focus.provider}.csr',
+            )
+            if os.path.isfile(_csr):
+                print(f"\n{'='*80}")
+                print(" FEDERATED SEARCH - REMAINING ACTION:")
+                print(f"{'='*80}")
+                print(f"   Send the CSR file to the EUCAIM central broker:")
+                print(f"     {_csr}")
+                print("   Once the signed certificate is returned by the central server,")
+                print("   deploy it to the beam-proxy pod to complete federated search setup.")
+        except Exception:
+            pass
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()

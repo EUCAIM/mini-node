@@ -135,3 +135,16 @@ class KeycloakAdminAPIClient:
                "value": password}
         self._PUT_JSON("users/"+userId+"/reset-password", json.dumps(req))
 
+    def getClientByClientId(self, clientId):
+        logging.root.debug('Getting client by clientId from KeycloakAdminAPI...')
+        response = self._GET_JSON("clients?clientId=" + urllib.parse.quote_plus(clientId))
+        if not isinstance(response, list) or len(response) == 0:
+            return None
+        for client in response:
+            if client.get("clientId") == clientId:
+                return client
+        return None
+
+    def createClient(self, client):
+        logging.root.debug('Creating client with KeycloakAdminAPI...')
+        self._POST_JSON("clients", json.dumps(client))
