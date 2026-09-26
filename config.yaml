@@ -4,11 +4,11 @@ host_path: "/home/ubuntu/minikube-data/"
 public_domain: "mininode.imaging.i3m.upv.es"
   # The public domain where the node will be accessible
 
-kubeapiserver_ip: "kubeserver.localdomain:6443"
+kubeapiserver_ip: "192.168.49.2:8443"
   # Optional. Kubernetes API server endpoint used by user-management jobs.
   # Format: "HOST:PORT" (example: "kubeserver.localdomain:6443")
   # If empty, defaults are:
-  # - minikube mode: kubeserver.localdomain:8443
+  # - minikube mode: 192.168.49.2:8443
   # - --k8s mode:    kubeserver.localdomain:6443
 
 nfs_server: "kubeserver.localdomain"
@@ -43,11 +43,11 @@ keycloak:
     client_secret: "xxxxxxxxx"
 
 # Optional: Platform administrator user (cluster admin)
-platform_admin_user:
-  username: "platform-admin"
-  email: "platform-admin@example.com"
-  password: "supersecret_platform_admin"
-    # This user will have administrative access to the entire platform
+#platform_admin_user:
+#  username: "platform-admin"
+#  email: "platform-admin@example.com"
+#  password: "supersecret_platform_admin"
+#    # This user will have administrative access to the entire platform
 
 oidc:
   authorization_endpoint: "https://[]/auth/realms/EUCAIM-NODE/protocol/openid-connect/auth"
