@@ -5530,7 +5530,7 @@ def install(flavor):
                 print(f"\n{'='*80}")
                 print(" FEDERATED SEARCH - REMAINING ACTION:")
                 print(f"{'='*80}")
-                print(f"   Send the CSR file to the EUCAIM central broker:")
+                print(f"   Send the CSR file to the EUCAIM central broker via https://help.cancerimage.eu/# federated-search tickets:")
                 print(f"     {_csr}")
                 print("   Once the signed certificate is returned by the central server,")
                 print("   deploy it to the beam-proxy pod to complete federated search setup.")
