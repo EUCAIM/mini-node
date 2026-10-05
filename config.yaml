@@ -101,5 +101,5 @@ focus:
     # and persisted so that both sides always use the SAME value.
   beam_broker_url: "https://broker.eucaim.cancerimage.eu"
     # URL of the EUCAIM beam broker
-  root_crt_pem: "/home/ubuntu/minikube-data/certs/fed-search/beam-root-ca.pem"
+  root_crt_pem: "root_ca_cert.pem"
 
