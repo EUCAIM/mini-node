@@ -14,7 +14,6 @@ import subprocess
 import time
 import sys
 
-from keycloak_admin_api import KeycloakAdminAPIClient
 from auth import AuthClient
 from config import *
 
@@ -4393,16 +4392,39 @@ def install_fed_search(CONFIG):
             f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search 2>/dev/null",
             exit_on_error=False,
         )
-        if _exists == 0:
+        if _exists == 0 and _key_available:
+            # Recreate the secret if the private key changed since it was created,
+            # so beam-proxy always mounts the matching key material.
+            _sec_ts = cmd_output(
+                f"minikube kubectl -- get secret {_priv_secret_name} -n federated-search "
+                f"-o jsonpath='{{.metadata.creationTimestamp}}' 2>/dev/null"
+            ).strip()
+            import datetime as _dt
+            try:
+                _sec_dt = _dt.datetime.fromisoformat(_sec_ts.replace('Z', '+00:00'))
+                _sec_ts_epoch = _sec_dt.timestamp()
+                _key_mtime = os.path.getmtime(key_file)
+                if _key_mtime > _sec_ts_epoch:
+                    print(f" Secret '{_priv_secret_name}' is older than the private key; recreating...")
+                    cmd(f"minikube kubectl -- delete secret {_priv_secret_name} -n federated-search --ignore-not-found=true")
+                    _exists = 1
+                else:
+                    print(f" Secret '{_priv_secret_name}' already exists, skipping.")
+            except Exception:
+                print(f" Secret '{_priv_secret_name}' already exists, skipping.")
+        elif _exists == 0:
             print(f" Secret '{_priv_secret_name}' already exists, skipping.")
-        elif _key_available:
+        if _exists != 0 and _key_available:
+            # Beam expects the private key file to be mounted with its canonical
+            # broker filename, otherwise the pod cannot find it at runtime.
+            beam_key_file_name = "eucaim.broker.eucaim.cancerimage.eu.priv.pem"
             cmd(
                 f"minikube kubectl -- create secret generic {_priv_secret_name}"
                 f" --namespace federated-search"
-                f" --from-file=proxy.pem={shlex.quote(key_file)}"
+                f" --from-file={beam_key_file_name}={shlex.quote(key_file)}"
                 f" --dry-run=client -o yaml | minikube kubectl -- apply -f -"
             )
-            print(f" Secret '{_priv_secret_name}' created from {key_file}")
+            print(f" Secret '{_priv_secret_name}' created from {key_file} as {beam_key_file_name}")
         else:
             print("  WARNING: 'focus.proxy_private_key_pem' not set and key generation failed.")
             print("  Beam-proxy pod will fail until this secret is created manually.")
@@ -5501,7 +5523,7 @@ def install(flavor):
                 print(f"\n{'='*80}")
                 print(" FEDERATED SEARCH - REMAINING ACTION:")
                 print(f"{'='*80}")
-                print(f"   Send the CSR file to the EUCAIM central broker:")
+                print(f"   Send the CSR file to the EUCAIM central broker via https://help.cancerimage.eu/# federated-search tickets:")
                 print(f"     {_csr}")
                 print("   Once the signed certificate is returned by the central server,")
                 print("   deploy it to the beam-proxy pod to complete federated search setup.")

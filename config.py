@@ -41,13 +41,6 @@ class Config:
         self.keycloak = Config.Keycloak(cfg['keycloak'])
         self.oidc = Config.OIDC(cfg['oidc'])
         
-        # Optional: Platform admin user (simple fields, not a class)
-        if 'platform_admin_user' in cfg:
-            pa = cfg['platform_admin_user']
-            self.platform_admin_username = pa.get('username')
-            self.platform_admin_email = pa.get('email')
-            self.platform_admin_password = pa.get('password')
-        
         # Optional: Let's Encrypt configuration for TLS certificates
         if 'letsencrypt' in cfg:
             self.letsencrypt = Config.LetsEncrypt(cfg['letsencrypt'])
