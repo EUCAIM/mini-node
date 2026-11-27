@@ -29,7 +29,8 @@ The following tools must be installed before running the installation:
 
 1. **Python 3** with dependencies
    ```bash
-   sudo apt-get install python3 python3-pip python3-yaml
+   sudo apt-get update
+   sudo apt-get -y install python3 python3-pip python3-yaml
    ```
 
 2. **Git** (version control)
@@ -41,6 +42,8 @@ The following tools must be installed before running the installation:
    ```bash
    curl -fsSL https://get.docker.com -o get-docker.sh
    sudo sh get-docker.sh
+   sudo usermod -aG docker $USER
+   newgrp docker   # or log out and back in for group changes to take effect
    ```
 
 4. **Minikube** *(only for development/single-node setup — skip if using a production Kubernetes cluster)*
@@ -98,7 +101,10 @@ Some repositories must be cloned manually before running the installation:
    - Contains: domain, passwords, database settings, OIDC configuration, etc.
    
    The first time you must create your own private copy from the template  
-   and adjust the values in your copy according to your deployment case using your favorite editor:
+   and adjust the values in your copy according to your deployment case using your favorite editor, mke sure to update at least:
+   - `host_path`: must match the host directory mounted into Minikube (e.g., `/home/ubuntu/<host-data-path>/`).
+   - `public_domain`: your node's domain (or `"localhost"` for local/tunneled access).
+   - `oidc`: replace all `[]` placeholders in `authorization_endpoint`, `jwks_endpoint`, `issuer`, and `redirect_uri` with your `public_domain`.
    ```
    cp config.yaml config.private.yaml
    nano config.private.yaml
